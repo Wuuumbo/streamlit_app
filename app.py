@@ -310,14 +310,30 @@ with tab_over:
     st.caption("**Pourquoi** — Met les actifs sur une échelle comparable; **Comment** — Regarde qui surperforme (s’éloigne >100) sur la fenêtre choisie.")
 
     # Scatter + droite OLS
-    st.subheader("Dispersion des rendements (B vs A) + OLS")
-    XY = rets[[ticker_a, ticker_b]].dropna().copy()
-    X = sm.add_constant(XY[ticker_a]); mod = sm.OLS(XY[ticker_a.name.replace(ticker_a, ticker_b)], X).fit()
-    XY["pred"] = mod.predict(X)
-    fig_sc = px.scatter(XY, x=ticker_a, y=ticker_b, opacity=0.6)
-    fig_sc.add_traces(px.line(XY.sort_values(ticker_a), x=ticker_a, y="pred").data)
-    st.plotly_chart(fig_sc, use_container_width=True, theme="streamlit")
-    st.caption("**Lecture** — La pente correspond à β; les points loin de la droite sont des anomalies/idiosyncratiques; utile pour **hedging** et **pairs**.")
+st.subheader("Dispersion des rendements (B vs A) + OLS")
+
+XY = rets[[ticker_a, ticker_b]].dropna().copy()
+
+# garde-fous si les colonnes ne sont pas exactement présentes
+x_col = ticker_a if ticker_a in XY.columns else XY.columns[0]
+y_col = ticker_b if ticker_b in XY.columns else XY.columns[1]
+
+X = sm.add_constant(XY[x_col])
+y = XY[y_col]
+mod = sm.OLS(y, X).fit()
+XY["pred"] = mod.predict(X)
+
+fig_sc = px.scatter(XY, x=x_col, y=y_col, opacity=0.6)
+fig_sc.add_traces(px.line(XY.sort_values(x_col), x=x_col, y="pred").data)
+st.plotly_chart(fig_sc, use_container_width=True, theme="streamlit")
+st.caption("**Lecture** — La pente de la droite est β (sensibilité de B à A) ; les points éloignés sont des écarts idiosyncratiques.")
+
+
+
+
+
+
+
 
     # Drawdowns
     st.subheader("Drawdowns cumulés")
@@ -589,3 +605,4 @@ with tab_data:
     st.download_button("📥 RENDEMENTS (CSV)", data=rets.to_csv().encode("utf-8"), file_name="returns.csv")
 
 st.caption("⚠️ Outil d'analyse avancée à visée pédagogique. Non destiné au conseil en investissement.")
+
