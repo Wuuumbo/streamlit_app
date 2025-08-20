@@ -228,6 +228,13 @@ if raw_daily is None or raw_daily.empty:
     st.warning("Données indisponibles (Yahoo Finance). Vérifie tickers/période.")
     st.stop()
 
+# Vérifier que les 2 colonnes existent
+missing_cols = [t for t in [ticker_a, ticker_b] if t not in raw_daily.columns]
+if missing_cols:
+    st.error(f"Les tickers suivants n'ont pas été trouvés dans les données: {missing_cols}. "
+             f"Colonnes reçues: {list(raw_daily.columns)}")
+    st.stop()
+
 # Alignement, ffill et strict filter
 raw_daily = safe_two_cols(raw_daily.ffill(), ticker_a, ticker_b).dropna(how="all")
 prices_resampled = strict_resample(raw_daily, rule).ffill()
@@ -243,9 +250,10 @@ if rets.empty:
     st.warning("Rendements insuffisants après nettoyage.")
     st.stop()
 
-# Audit de complétude : couverture calendaires attendues vs observées
+# Audit de complétude : couverture attendue vs observée (utilise jours ouvrés pour le journalier)
 def expected_points(start, end, rule):
-    rng = pd.date_range(start=start, end=end, freq=rule)
+    freq = "B" if rule == "D" else rule  # "B" = business days
+    rng = pd.date_range(start=start, end=end, freq=freq)
     return len(rng)
 
 expected = expected_points(start_date, end_date, rule)
@@ -309,31 +317,17 @@ with tab_over:
     st.plotly_chart(fig_idx, use_container_width=True, theme="streamlit")
     st.caption("**Pourquoi** — Met les actifs sur une échelle comparable; **Comment** — Regarde qui surperforme (s’éloigne >100) sur la fenêtre choisie.")
 
-    # Scatter + droite OLS
-st.subheader("Dispersion des rendements (B vs A) + OLS")
-
-XY = rets[[ticker_a, ticker_b]].dropna().copy()
-
-# garde-fous si les colonnes ne sont pas exactement présentes
-x_col = ticker_a if ticker_a in XY.columns else XY.columns[0]
-y_col = ticker_b if ticker_b in XY.columns else XY.columns[1]
-
-X = sm.add_constant(XY[x_col])
-y = XY[y_col]
-mod = sm.OLS(y, X).fit()
-XY["pred"] = mod.predict(X)
-
-fig_sc = px.scatter(XY, x=x_col, y=y_col, opacity=0.6)
-fig_sc.add_traces(px.line(XY.sort_values(x_col), x=x_col, y="pred").data)
-st.plotly_chart(fig_sc, use_container_width=True, theme="streamlit")
-st.caption("**Lecture** — La pente de la droite est β (sensibilité de B à A) ; les points éloignés sont des écarts idiosyncratiques.")
-
-
-
-
-
-
-
+    # Scatter + droite OLS (✅ correctif: y = XY[ticker_b], pas ticker_a.name)
+    st.subheader("Dispersion des rendements (B vs A) + OLS")
+    XY = rets[[ticker_a, ticker_b]].dropna().copy()
+    X = sm.add_constant(XY[ticker_a])
+    y = XY[ticker_b]
+    mod = sm.OLS(y, X).fit()
+    XY["pred"] = mod.predict(X)
+    fig_sc = px.scatter(XY, x=ticker_a, y=ticker_b, opacity=0.6)
+    fig_sc.add_traces(px.line(XY.sort_values(ticker_a), x=ticker_a, y="pred").data)
+    st.plotly_chart(fig_sc, use_container_width=True, theme="streamlit")
+    st.caption("**Lecture** — La pente correspond à β; les points loin de la droite sont des anomalies/idiosyncratiques; utile pour **hedging** et **pairs**.")
 
     # Drawdowns
     st.subheader("Drawdowns cumulés")
@@ -605,4 +599,3 @@ with tab_data:
     st.download_button("📥 RENDEMENTS (CSV)", data=rets.to_csv().encode("utf-8"), file_name="returns.csv")
 
 st.caption("⚠️ Outil d'analyse avancée à visée pédagogique. Non destiné au conseil en investissement.")
-
