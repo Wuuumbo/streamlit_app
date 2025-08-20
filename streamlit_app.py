@@ -254,37 +254,4 @@ st.caption("Source: Yahoo Finance via yfinance (gratuit, sans clé API).")
 # scipy
 # statsmodels
 
-# =============================
-# File: README.md
-# =============================
-# Asset Pair Risk & Volatility Dashboard
 
-Une application Streamlit gratuite pour analyser **n'importe quelle paire d'actifs** (actions, ETF, indices, forex, crypto) :
-- Prix normalisés, rendements, corrélation glissante
-- Volatilités (ann.), VaR/CVaR historiques
-- Sharpe (approx), bêta roulant, drawdowns
-- Test de **cointégration** (Engle–Granger) et spread/z-score si p<0.05
-
-## Utilisation (local)
-1. Installer Python 3.10+
-2. Créer un environnement puis :
-```bash
-pip install -r requirements.txt
-streamlit run streamlit_app.py
-```
-
-## Déploiement gratuit (Streamlit Community Cloud)
-1. Créez un dépôt GitHub avec **streamlit_app.py** et **requirements.txt**.
-2. Allez sur [Streamlit Community Cloud] et "Deploy an app".
-3. Sélectionnez le dépôt, le fichier `streamlit_app.py`, et déployez.
-4. Vous obtiendrez une URL publique à partager aux recruteurs.
-
-## Conseils tickers Yahoo
-- Indices : `^GSPC` (S&P 500), `^NDX`, `^FCHI` (CAC 40)
-- Forex : `EURUSD=X`, `EURGBP=X`
-- Crypto : `BTC-USD`, `ETH-USD`
-- Matières premières : `GC=F` (Or), `CL=F` (WTI)
-
-## Notes
-- Les intervalles intraday (1h/30m/15m) peuvent être limités sur longues périodes par Yahoo.
-- Si un ticker ne renvoie rien, essayez un autre symbole ou passez à `1d`.
