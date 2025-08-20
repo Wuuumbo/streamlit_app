@@ -1,5 +1,5 @@
 # app.py — Asset Risk, Volatility & Pair Analysis (2 actifs)
-# Un seul fichier. Compatible Streamlit Cloud/Replit.
+
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -561,4 +561,5 @@ with tab_data:
     st.dataframe(rets, use_container_width=True)
     st.download_button("📥 RENDEMENTS (CSV)", data=rets.to_csv().encode("utf-8"), file_name="returns.csv")
 
-st.caption("⚠️ Outil d'analyse avancée à visée pédagogique. Non destiné au conseil en investissement.")
+
+
