@@ -728,9 +728,9 @@ def main_app():
 
     # Final notes and footer
     st.markdown('---')
-    st.markdown('**Notes:** This application uses simple, transparent forecasting models
+    st.markdown("""Notes:** This application uses simple, transparent forecasting models
                 for pedagogical purposes. For production-grade forecasting use proper
-                time-series models (ARIMA, Prophet, LSTM) and validate statistically.')
+                time-series models (ARIMA, Prophet, LSTM) and validate statistically.""")
 
 
 # ----------------------------------------------------------------------
@@ -743,3 +743,4 @@ if __name__ == '__main__':
 # End of file
 # This file is intentionally long, commented and educational. You can trim
 # sections you don't need, or modularize into multiple files for production.
+
