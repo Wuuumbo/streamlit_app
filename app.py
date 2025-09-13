@@ -1,747 +1,699 @@
 # -*- coding: utf-8 -*-
 """
-Ultra Stock Analyzer - Single File
+Quantitative Trading Platform - Skeleton
+File: quant_trading_skeleton.py
 Author: Generated for Florentin Gaugry
-Description:
-A single-file Streamlit application intended to be a professional-grade
-analysis tool for traders and statisticians. This file contains all code,
-visualizations and export utilities in one place so you can copy-paste
-into app.py, push to GitHub and deploy to Streamlit Cloud.
+Purpose:
+    Single-file skeleton providing classes, methods and a clear structure
+    for the 6-module quantitative trading system described in the design
+    document. This skeleton is intentionally verbose and heavily commented
+    so it acts both as a starting codebase and as documentation for a team.
+
+How to use:
+    - Drop this file into your project and import classes into your modules.
+    - Fill the TODO sections with real implementations and API keys.
+    - Use the provided Streamlit / CLI examples at the bottom to run a quick MVP.
 
 Notes:
-- This file intentionally contains a lot of comments, repeated structure and
-  helper functions to be explicit and educational. That also helps reach the
-  "single-file, 500+ lines" requirement.
-- Dependencies: yfinance, pandas, numpy, streamlit, plotly, xlsxwriter
-- Usage example: save as app.py and run `streamlit run app.py`
-
-Features included (complete):
-- Multi-ticker historical data retrieval (Yahoo Finance)
-- Extensive ratio calculation (PE, PB, ROE, ROA, EV/EBITDA, FCF yield..., etc.)
-- Technical indicators: SMA, EMA, RSI, MACD, Bollinger Bands, ATR, OBV
-- Candlestick charts, price/volume, return histograms, correlation matrix
-- Simple forecasting modules (linear trend, MA-extrapolation) and scenario analysis
-- Export to CSV/Excel for single ticker and multi-ticker summary
-- Interactive Streamlit UI with sidebar controls, downloads and presets
-
-This file was created to be readable, extendable and to respect the user's
-requirement for a long single-file deliverable appropriate for a serious
-statistician/trader.
+    - This is only a skeleton: it focuses on architecture, interfaces and
+      data flow rather than on production-ready implementations.
+    - Dependencies: pandas, numpy, yfinance, requests, statsmodels, scipy,
+      plotly, streamlit (only for the demo at the bottom). Add them to your
+      environment before using interactive parts.
 
 """
 
-# ----------------------------------------------------------------------
-# Imports
-# ----------------------------------------------------------------------
-import yfinance as yf
+# Standard imports
+import time
+import math
+import json
+import logging
+from typing import List, Dict, Optional, Any, Tuple
+from dataclasses import dataclass, field
+
+# Data & numerics
 import pandas as pd
 import numpy as np
-import streamlit as st
+
+# Finance data
+import yfinance as yf
+
+# Stats & econ
+import statsmodels.api as sm
+from statsmodels.tsa.stattools import adfuller
+import scipy.optimize as optimize
+
+# Visualization (used in demo)
 import plotly.graph_objects as go
 import plotly.express as px
-from plotly.subplots import make_subplots
-from datetime import datetime, timedelta
-import io
-import math
-import statistics
 
-# ----------------------------------------------------------------------
-# Constants & Defaults
-# ----------------------------------------------------------------------
-DEFAULT_TICKERS = ["AAPL", "MSFT", "TSLA"]
-DEFAULT_PERIOD = "5y"
-DEFAULT_INTERVAL = "1d"
+# Optional: streamlit demo at end
+try:
+    import streamlit as st
+    STREAMLIT_AVAILABLE = True
+except Exception:
+    STREAMLIT_AVAILABLE = False
 
-# For reproducibility where randomness is used
-RNG_SEED = 42
-np.random.seed(RNG_SEED)
+# Set up basic logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-# ----------------------------------------------------------------------
-# Utility helper functions (small and explicit)
-# ----------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Utilities & Types
+# ---------------------------------------------------------------------------
+
+@dataclass
+class TickerSpec:
+    """Simple container for ticker metadata."""
+    symbol: str
+    name: Optional[str] = None
+    sector: Optional[str] = None
+    exchange: Optional[str] = None
+
 
 def safe_div(a, b):
-    """Divide a by b but return np.nan instead of raising when b==0."""
     try:
-        if b == 0 or b is None:
+        if b == 0 or b is None or pd.isna(b):
             return np.nan
         return a / b
     except Exception:
         return np.nan
 
 
-def format_large_number(x):
-    """Format large numbers for display (thousands, millions, billions)."""
-    try:
-        if pd.isna(x):
-            return "N/A"
-        x = float(x)
-        if abs(x) >= 1_000_000_000:
-            return f"{x/1_000_000_000:.2f} B"
-        if abs(x) >= 1_000_000:
-            return f"{x/1_000_000:.2f} M"
-        if abs(x) >= 1_000:
-            return f"{x/1_000:.2f} K"
-        return f"{x:.2f}"
-    except Exception:
-        return str(x)
+# ---------------------------------------------------------------------------
+# Module 1: Data Engine & Universe Management
+# ---------------------------------------------------------------------------
 
-
-# ----------------------------------------------------------------------
-# Data retrieval functions
-# ----------------------------------------------------------------------
-
-def get_stock_history(ticker: str, period: str = DEFAULT_PERIOD, interval: str = DEFAULT_INTERVAL) -> pd.DataFrame:
-    """Retrieve historical OHLCV data for a ticker using yfinance.
-
-    Returns a DataFrame indexed by Datetime with columns: Open, High, Low, Close, Volume
-    The function always returns a DataFrame (empty if retrieval failed).
+class DataEngine:
     """
-    try:
-        # Use yf.Ticker.history for robust retrieval
-        t = yf.Ticker(ticker)
-        df = t.history(period=period, interval=interval)
-        if df is None:
+    Responsible for retrieving, caching and serving market and fundamental data.
+
+    Responsibilities:
+    - Connect to data providers (yfinance by default)
+    - Normalize OHLCV, fundamentals, and options chains
+    - Provide a light caching layer to avoid repeated downloads
+    - Export and import snapshots
+    """
+
+    def __init__(self, cache_dir: str = './data_cache'):
+        self.cache_dir = cache_dir
+        # simple in-memory cache: { (ticker, period, interval): DataFrame }
+        self._history_cache: Dict[Tuple[str, str, str], pd.DataFrame] = {}
+        # fundamentals cache
+        self._fund_cache: Dict[str, Dict[str, Any]] = {}
+        # universe management
+        self.universes: Dict[str, List[str]] = {}
+
+    # -----------------
+    # Universe management
+    # -----------------
+    def create_universe(self, name: str, tickers: List[str]):
+        """Create or overwrite a universe (list of tickers)."""
+        self.universes[name] = [t.upper() for t in tickers]
+        logger.info(f"Universe '{name}' set with {len(tickers)} tickers")
+
+    def get_universe(self, name: str) -> List[str]:
+        return self.universes.get(name, [])
+
+    def list_universes(self) -> List[str]:
+        return list(self.universes.keys())
+
+    # -----------------
+    # Data retrieval
+    # -----------------
+    def fetch_history(self, ticker: str, period: str = '5y', interval: str = '1d', force_refresh: bool=False) -> pd.DataFrame:
+        key = (ticker.upper(), period, interval)
+        if not force_refresh and key in self._history_cache:
+            logger.debug(f"Returning cached history for {ticker} {period}@{interval}")
+            return self._history_cache[key].copy()
+
+        # Retrieve via yfinance for prototype
+        try:
+            t = yf.Ticker(ticker)
+            df = t.history(period=period, interval=interval, auto_adjust=False, actions=False)
+            # Normalize column names and ensure datetime index
+            if not isinstance(df, pd.DataFrame):
+                df = pd.DataFrame()
+            df = df.rename(columns=lambda c: c.strip())
+            # Keep essential columns
+            for col in ['Open', 'High', 'Low', 'Close', 'Volume']:
+                if col not in df.columns:
+                    df[col] = np.nan
+            df = df[['Open','High','Low','Close','Volume']]
+            df.index = pd.to_datetime(df.index)
+            # store
+            self._history_cache[key] = df.copy()
+            logger.info(f"Fetched history for {ticker}: {df.shape[0]} rows")
+            return df
+        except Exception as e:
+            logger.error(f"Error fetching history for {ticker}: {e}")
             return pd.DataFrame()
-        # Standardize columns and index
-        df = df.rename(columns=lambda c: c.strip())
-        # Keep only relevant columns and ensure types
-        expected = ["Open", "High", "Low", "Close", "Volume"]
-        for col in expected:
-            if col not in df.columns:
-                df[col] = np.nan
-        df = df[expected]
-        df.index = pd.to_datetime(df.index)
+
+    def fetch_fundamentals(self, ticker: str, force_refresh: bool=False) -> Dict[str, Any]:
+        t = ticker.upper()
+        if not force_refresh and t in self._fund_cache:
+            return self._fund_cache[t]
+        try:
+            yf_t = yf.Ticker(t)
+            info = yf_t.info if hasattr(yf_t, 'info') else {}
+            # Keep a shallow subset to avoid huge payloads
+            keys_wanted = ['sector','marketCap','trailingPE','forwardPE','priceToBook','pegRatio',
+                           'returnOnEquity','returnOnAssets','debtToEquity','beta','ebitda','freeCashflow']
+            out = {k: info.get(k, None) for k in keys_wanted}
+            self._fund_cache[t] = out
+            logger.info(f"Fetched fundamentals for {t}")
+            return out
+        except Exception as e:
+            logger.error(f"Error fetching fundamentals for {t}: {e}")
+            return {}
+
+    # -----------------
+    # Persistence (simple JSON/CSV snapshots)
+    # -----------------
+    def save_snapshot(self, ticker: str, df: pd.DataFrame, filename: Optional[str] = None):
+        if filename is None:
+            filename = f"{self.cache_dir}/{ticker}_snapshot.csv"
+        df.to_csv(filename)
+        logger.info(f"Saved snapshot {filename}")
+
+    def load_snapshot(self, filename: str) -> pd.DataFrame:
+        df = pd.read_csv(filename, index_col=0, parse_dates=True)
         return df
-    except Exception as e:
-        # In production app, consider logging rather than st.error here.
-        st.error(f"Erreur récupération historique pour {ticker}: {e}")
-        return pd.DataFrame()
 
 
-# ----------------------------------------------------------------------
-# Financial ratios and fundamentals (from yfinance.info) -- defensive coding
-# ----------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Module 2: Market Regime Dashboard
+# ---------------------------------------------------------------------------
 
-def get_fundamentals(ticker: str) -> dict:
-    """Retrieve fundamental/company info via yfinance's .info attribute.
-
-    Warning: yfinance.info can be slow or incomplete for some tickers. The function
-    wraps the access in try/except and provides defaults.
+class MarketRegimeDashboard:
     """
-    try:
-        t = yf.Ticker(ticker)
-        info = t.info if hasattr(t, "info") else {}
-        if not isinstance(info, dict):
-            info = dict(info)
-        return info
-    except Exception as e:
-        st.warning(f"Impossible de récupérer les fundamentals pour {ticker}: {e}")
-        return {}
+    Provides a fast, visual summary of market conditions (volatility, trend, breadth).
 
-
-# Helper: pull a safe numeric from info
-
-def _info_get(info: dict, key: str):
-    try:
-        return info.get(key, np.nan)
-    except Exception:
-        return np.nan
-
-
-# Core ratio calculator with many metrics
-
-def calculate_all_ratios(ticker: str) -> pd.DataFrame:
-    """Return a one-row DataFrame with many financial ratios for the ticker.
-
-    The DataFrame contains explanatory column names and numeric values when available.
+    Expected inputs: VIX/VSTOXX series, sector returns, breadth metrics.
+    For a prototype, uses simple moving-average thresholds and volatility percentiles.
     """
-    info = get_fundamentals(ticker)
 
-    # Basic price and market metrics
-    current_price = _info_get(info, "currentPrice")
-    market_cap = _info_get(info, "marketCap")
-    shares_outstanding = _info_get(info, "sharesOutstanding")
+    def __init__(self, data_engine: DataEngine):
+        self.de = data_engine
 
-    # Profitability and valuation
-    trailing_pe = _info_get(info, "trailingPE")
-    forward_pe = _info_get(info, "forwardPE")
-    price_to_book = _info_get(info, "priceToBook")
-    peg_ratio = _info_get(info, "pegRatio")
+    def compute_iv_rank(self, iv_series: pd.Series) -> float:
+        """Simplified IV Rank: percentile of current IV in trailing window (1 year).
 
-    # Profitability ratios
-    roe = _info_get(info, "returnOnEquity")
-    roa = _info_get(info, "returnOnAssets")
-    gross_margin = _info_get(info, "grossMargins")
-    operating_margin = _info_get(info, "operatingMargins")
-
-    # Leverage
-    debt_to_equity = _info_get(info, "debtToEquity")
-
-    # Growth metrics
-    revenue_growth = _info_get(info, "revenueGrowth")
-
-    # Cashflow & EBITDA
-    ebitda = _info_get(info, "ebitda")
-    free_cashflow = _info_get(info, "freeCashflow")
-
-    # Enterprise Value based metrics
-    enterprise_value = _info_get(info, "enterpriseValue")
-    ev_to_ebitda = _info_get(info, "enterpriseToEbitda")
-
-    # Dividend
-    dividend_yield = _info_get(info, "dividendYield")
-
-    # Volatility / beta
-    beta = _info_get(info, "beta")
-
-    # Build dictionary
-    ratios = {
-        "Ticker": ticker,
-        "Current Price": current_price,
-        "Market Cap": market_cap,
-        "Shares Outstanding": shares_outstanding,
-        "Trailing P/E": trailing_pe,
-        "Forward P/E": forward_pe,
-        "Price/Book": price_to_book,
-        "PEG Ratio": peg_ratio,
-        "ROE": roe,
-        "ROA": roa,
-        "Gross Margin": gross_margin,
-        "Operating Margin": operating_margin,
-        "Debt/Equity": debt_to_equity,
-        "Revenue Growth": revenue_growth,
-        "EBITDA": ebitda,
-        "Free Cash Flow": free_cashflow,
-        "Enterprise Value": enterprise_value,
-        "EV/EBITDA": ev_to_ebitda,
-        "Dividend Yield": dividend_yield,
-        "Beta": beta,
-    }
-
-    # Compute some derived metrics where possible
-    try:
-        if not math.isnan(current_price) and not math.isnan(shares_outstanding):
-            derived_market_cap = safe_div(current_price * shares_outstanding, 1)
-            # keep original market cap if provided, but add derived for cross-check
-            ratios["Derived Market Cap"] = derived_market_cap
-        else:
-            ratios["Derived Market Cap"] = np.nan
-    except Exception:
-        ratios["Derived Market Cap"] = np.nan
-
-    # Return as DataFrame for easy display & concatenation
-    return pd.DataFrame([ratios])
-
-
-# ----------------------------------------------------------------------
-# Technical indicators detailed implementations (explicit, commented)
-# ----------------------------------------------------------------------
-
-def sma(series: pd.Series, window: int) -> pd.Series:
-    """Simple Moving Average (SMA)"""
-    return series.rolling(window=window, min_periods=1).mean()
-
-
-def ema(series: pd.Series, span: int) -> pd.Series:
-    """Exponential Moving Average (EMA)"""
-    return series.ewm(span=span, adjust=False).mean()
-
-
-def rsi(series: pd.Series, window: int = 14) -> pd.Series:
-    """Relative Strength Index (RSI) implemented in a robust way."""
-    delta = series.diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    # Use Wilder's smoothing
-    avg_gain = gain.ewm(alpha=1/window, adjust=False).mean()
-    avg_loss = loss.ewm(alpha=1/window, adjust=False).mean()
-    rs = safe_div(avg_gain, avg_loss)
-    rsi_series = 100 - (100 / (1 + rs))
-    return rsi_series
-
-
-def macd(series: pd.Series, span_short: int = 12, span_long: int = 26, span_signal: int = 9) -> pd.DataFrame:
-    """MACD and signal line"""
-    ema_short = ema(series, span_short)
-    ema_long = ema(series, span_long)
-    macd_line = ema_short - ema_long
-    signal_line = macd_line.ewm(span=span_signal, adjust=False).mean()
-    hist = macd_line - signal_line
-    return pd.DataFrame({"MACD": macd_line, "Signal": signal_line, "Hist": hist})
-
-
-def bollinger_bands(series: pd.Series, window: int = 20, n_std: int = 2) -> pd.DataFrame:
-    """Return middle, upper and lower Bollinger Bands"""
-    middle = series.rolling(window=window).mean()
-    std = series.rolling(window=window).std()
-    upper = middle + n_std * std
-    lower = middle - n_std * std
-    return pd.DataFrame({"BB_Middle": middle, "BB_Upper": upper, "BB_Lower": lower})
-
-
-def atr(df: pd.DataFrame, window: int = 14) -> pd.Series:
-    """Average True Range (ATR) for volatility"""
-    high_low = df['High'] - df['Low']
-    high_close = (df['High'] - df['Close'].shift()).abs()
-    low_close = (df['Low'] - df['Close'].shift()).abs()
-    tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
-    return tr.rolling(window=window).mean()
-
-
-def obv(df: pd.DataFrame) -> pd.Series:
-    """On-Balance Volume (OBV) indicator"""
-    obv = [0]
-    for i in range(1, len(df)):
-        if df['Close'].iat[i] > df['Close'].iat[i-1]:
-            obv.append(obv[-1] + df['Volume'].iat[i])
-        elif df['Close'].iat[i] < df['Close'].iat[i-1]:
-            obv.append(obv[-1] - df['Volume'].iat[i])
-        else:
-            obv.append(obv[-1])
-    return pd.Series(obv, index=df.index)
-
-
-# ----------------------------------------------------------------------
-# Data augmentation: add indicators to dataframe (column-by-column)
-# ----------------------------------------------------------------------
-
-def augment_with_indicators(df: pd.DataFrame, add_obv: bool = True) -> pd.DataFrame:
-    """Add a comprehensive set of indicators to the OHLCV DataFrame."""
-    df = df.copy()
-    # Ensure Close type
-    df['Close'] = pd.to_numeric(df['Close'], errors='coerce')
-
-    # Simple moving averages
-    for w in [5, 10, 20, 50, 100, 200]:
-        df[f'SMA_{w}'] = sma(df['Close'], w)
-
-    # Exponential moving averages (short and long)
-    for span in [8, 12, 26, 50]:
-        df[f'EMA_{span}'] = ema(df['Close'], span)
-
-    # RSI
-    df['RSI_14'] = rsi(df['Close'], 14)
-
-    # MACD
-    macd_df = macd(df['Close'], 12, 26, 9)
-    df['MACD'] = macd_df['MACD']
-    df['MACD_Signal'] = macd_df['Signal']
-    df['MACD_Hist'] = macd_df['Hist']
-
-    # Bollinger Bands
-    bb = bollinger_bands(df['Close'], 20, 2)
-    df['BB_Middle'] = bb['BB_Middle']
-    df['BB_Upper'] = bb['BB_Upper']
-    df['BB_Lower'] = bb['BB_Lower']
-
-    # ATR
-    df['ATR_14'] = atr(df, 14)
-
-    # OBV
-    if add_obv:
-        df['OBV'] = obv(df)
-
-    # Daily returns and log returns
-    df['Return'] = df['Close'].pct_change()
-    df['LogReturn'] = np.log(df['Close'] / df['Close'].shift(1))
-
-    # Cumulative return (from start of the period)
-    df['CumulativeReturn'] = (1 + df['Return']).cumprod() - 1
-
-    # Fill forward small NaNs to avoid plotting issues
-    df = df.fillna(method='ffill').fillna(method='bfill')
-
-    return df
-
-
-# ----------------------------------------------------------------------
-# Plotting functions (many variations for deep analysis)
-# ----------------------------------------------------------------------
-
-def plot_price_with_sma(df: pd.DataFrame, ticker: str, ma_windows=[20,50,100]):
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=df.index, y=df['Close'], name='Close', line=dict(width=2)))
-    for w in ma_windows:
-        col = f'SMA_{w}'
-        if col in df.columns:
-            fig.add_trace(go.Scatter(x=df.index, y=df[col], name=f'SMA {w}', opacity=0.8))
-    fig.update_layout(title=f"{ticker} - Price with SMA", xaxis_title='Date', yaxis_title='Price')
-    st.plotly_chart(fig, use_container_width=True)
-
-
-def plot_candlestick_with_bands(df: pd.DataFrame, ticker: str):
-    fig = go.Figure()
-    fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name='Candlestick'))
-    if 'BB_Upper' in df.columns:
-        fig.add_trace(go.Scatter(x=df.index, y=df['BB_Upper'], name='BB Upper', line=dict(dash='dash')))
-    if 'BB_Middle' in df.columns:
-        fig.add_trace(go.Scatter(x=df.index, y=df['BB_Middle'], name='BB Middle', line=dict(dash='dot')))
-    if 'BB_Lower' in df.columns:
-        fig.add_trace(go.Scatter(x=df.index, y=df['BB_Lower'], name='BB Lower', line=dict(dash='dash')))
-    fig.update_layout(title=f"{ticker} - Candlestick with Bollinger Bands", xaxis_title='Date')
-    st.plotly_chart(fig, use_container_width=True)
-
-
-def plot_macd(df: pd.DataFrame, ticker: str):
-    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=[0.7, 0.3])
-    fig.add_trace(go.Scatter(x=df.index, y=df['Close'], name='Close'), row=1, col=1)
-    fig.add_trace(go.Bar(x=df.index, y=df['MACD_Hist'], name='MACD Histogram'), row=2, col=1)
-    fig.add_trace(go.Scatter(x=df.index, y=df['MACD'], name='MACD'), row=2, col=1)
-    fig.add_trace(go.Scatter(x=df.index, y=df['MACD_Signal'], name='Signal'), row=2, col=1)
-    fig.update_layout(title=f"{ticker} - MACD", xaxis_title='Date')
-    st.plotly_chart(fig, use_container_width=True)
-
-
-def plot_rsi(df: pd.DataFrame, ticker: str):
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=df.index, y=df['RSI_14'], name='RSI 14'))
-    fig.update_layout(title=f"{ticker} - RSI (14)", yaxis=dict(range=[0,100]), xaxis_title='Date')
-    st.plotly_chart(fig, use_container_width=True)
-
-
-def plot_volume_and_obv(df: pd.DataFrame, ticker: str):
-    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.4,0.6])
-    fig.add_trace(go.Bar(x=df.index, y=df['Volume'], name='Volume'), row=1, col=1)
-    if 'OBV' in df.columns:
-        fig.add_trace(go.Scatter(x=df.index, y=df['OBV'], name='OBV'), row=2, col=1)
-    fig.update_layout(title=f"{ticker} - Volume & OBV")
-    st.plotly_chart(fig, use_container_width=True)
-
-
-def plot_return_distribution(df: pd.DataFrame, ticker: str):
-    fig = px.histogram(df, x='Return', nbins=100, marginal='box', title=f"{ticker} - Daily Return Distribution")
-    st.plotly_chart(fig, use_container_width=True)
-
-
-def plot_correlation_matrix(df_dict: dict, tickers: list):
-    """Given a dict of dataframes keyed by ticker, compute return correlations and plot heatmap."""
-    returns = pd.DataFrame({t: df_dict[t]['Return'] for t in tickers})
-    corr = returns.corr()
-    fig = px.imshow(corr, text_auto=True, title='Correlation matrix (daily returns)')
-    st.plotly_chart(fig, use_container_width=True)
-
-
-# ----------------------------------------------------------------------
-# Forecasting & Scenario modules (simple but transparent)
-# ----------------------------------------------------------------------
-
-def linear_trend_forecast(series: pd.Series, days_ahead: int = 5) -> pd.DataFrame:
-    """Simple linear regression on most recent N days to forecast next days.
-
-    Returns a DataFrame with forecast dates and predicted prices.
-    """
-    # Prepare data
-    y = series.dropna().values
-    if len(y) < 2:
-        return pd.DataFrame()
-    x = np.arange(len(y))
-    # Fit linear regression (least squares)
-    A = np.vstack([x, np.ones(len(x))]).T
-    m, c = np.linalg.lstsq(A, y, rcond=None)[0]
-    # Create forecast
-    future_x = np.arange(len(y), len(y) + days_ahead)
-    preds = m * future_x + c
-    # Build index of future dates matching the original series frequency
-    last_date = series.dropna().index[-1]
-    freq = pd.infer_freq(series.dropna().index)
-    if freq is None:
-        # fallback: use business days
-        future_index = pd.bdate_range(last_date + pd.Timedelta(days=1), periods=days_ahead)
-    else:
-        future_index = pd.date_range(last_date + pd.Timedelta(1, unit=freq[0]), periods=days_ahead, freq=freq)
-    return pd.DataFrame({'Forecast': preds}, index=future_index)
-
-
-def ma_extrapolation_forecast(series: pd.Series, window: int = 20, days_ahead: int = 5) -> pd.DataFrame:
-    """Forecast by extrapolating the last moving average plus trend of recent window."""
-    series = series.dropna()
-    if len(series) < window + 1:
-        return pd.DataFrame()
-    ma = series.rolling(window=window).mean().dropna()
-    last_ma = ma.iloc[-1]
-    # trend over the last window using linear slope on the ma
-    x = np.arange(len(ma))
-    y = ma.values
-    A = np.vstack([x, np.ones(len(x))]).T
-    slope, intercept = np.linalg.lstsq(A, y, rcond=None)[0]
-    preds = []
-    last_index = series.index[-1]
-    for i in range(1, days_ahead + 1):
-        preds.append(last_ma + slope * i)
-    future_index = pd.bdate_range(last_index + pd.Timedelta(days=1), periods=days_ahead)
-    return pd.DataFrame({'Forecast_MA_Extrap': preds}, index=future_index)
-
-
-# ----------------------------------------------------------------------
-# Export utilities (CSV / Excel) for single and multi-ticker
-# ----------------------------------------------------------------------
-
-def export_df_to_csv(df: pd.DataFrame, filename: str):
-    csv = df.to_csv(index=True).encode('utf-8')
-    st.download_button(label=f"Download {filename}.csv", data=csv, file_name=f"{filename}.csv", mime='text/csv')
-
-
-def export_dfs_to_excel(dfs: dict, filename: str = 'export'):
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-        for name, df in dfs.items():
-            safe_name = str(name)[:31]  # Excel sheet name limit
-            df.to_excel(writer, sheet_name=safe_name)
-        writer.save()
-    st.download_button(label=f"Download {filename}.xlsx", data=output.getvalue(), file_name=f"{filename}.xlsx", mime='application/vnd.ms-excel')
-
-
-# ----------------------------------------------------------------------
-# Analysis orchestration: run the full pipeline for a ticker
-# ----------------------------------------------------------------------
-
-def analyze_ticker_pipeline(ticker: str, period: str, interval: str, conf: dict) -> dict:
-    """Complete pipeline: fetch, augment, compute ratios, forecast, and return results.
-
-    Returns a dictionary with keys: df (augmented), ratios_df, forecasts (dict), fundamentals
-    """
-    result = {
-        'df': pd.DataFrame(),
-        'ratios': pd.DataFrame(),
-        'forecasts': {},
-        'fundamentals': {}
-    }
-
-    # 1) Fetch historical price data
-    df = get_stock_history(ticker, period=period, interval=interval)
-    if df.empty:
-        return result
-
-    # 2) Augment with technical indicators
-    df_aug = augment_with_indicators(df, add_obv=True)
-
-    # 3) Compute fundamentals & ratios
-    ratios_df = calculate_all_ratios(ticker)
-    fundamentals = get_fundamentals(ticker)
-
-    # 4) Forecasts (linear and MA extrapolation)
-    try:
-        linear_forecast = linear_trend_forecast(df_aug['Close'], days_ahead=conf.get('forecast_days', 7))
-    except Exception:
-        linear_forecast = pd.DataFrame()
-    try:
-        ma_forecast = ma_extrapolation_forecast(df_aug['Close'], window=conf.get('ma_window', 20), days_ahead=conf.get('forecast_days', 7))
-    except Exception:
-        ma_forecast = pd.DataFrame()
-
-    result['df'] = df_aug
-    result['ratios'] = ratios_df
-    result['forecasts']['linear'] = linear_forecast
-    result['forecasts']['ma'] = ma_forecast
-    result['fundamentals'] = fundamentals
-
-    return result
-
-
-# ----------------------------------------------------------------------
-# Helper: pretty-print ratios (DataFrame with formatted numbers)
-# ----------------------------------------------------------------------
-
-def pretty_format_ratios(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
-    for col in df.columns:
-        df[col] = df[col].apply(format_large_number if pd.api.types.is_number_dtype(df[col]) else (lambda x: x))
-    return df
-
-
-# ----------------------------------------------------------------------
-# Streamlit App Layout and main loop
-# ----------------------------------------------------------------------
-
-def main_app():
-    st.set_page_config(page_title='Ultra Stock Analyzer - Single File', layout='wide')
-    st.title('📈 Ultra Stock Analyzer — Single-file professional edition')
-
-    # Instructions for the user
-    st.markdown(
+        Returns a value between 0 and 100.
         """
-        **Instructions:**
-        - Entrer un ou plusieurs tickers séparés par des virgules dans la barre latérale.
-        - Choisir la période et l'intervalle.
-        - Sélectionner les analyses désirées (indicateurs, forecast, export).
-        - Cliquer sur les boutons de téléchargement pour obtenir CSV/Excel.
+        window_days = min(len(iv_series), 252)
+        if window_days < 10:
+            return np.nan
+        window = iv_series.dropna().tail(window_days)
+        current = window.iloc[-1]
+        rank = (window < current).sum() / len(window) * 100
+        return float(rank)
+
+    def market_trend_score(self, benchmark_series: pd.Series) -> float:
+        """Compute a simple trend score: percent above MA50 & MA200"""
+        s = benchmark_series.dropna()
+        if len(s) < 200:
+            return np.nan
+        ma50 = s.rolling(50).mean()
+        ma200 = s.rolling(200).mean()
+        pct_above_50 = (s > ma50).tail(1).mean() * 100
+        pct_above_200 = (s > ma200).tail(1).mean() * 100
+        # custom aggregation
+        score = 0.6 * pct_above_200 + 0.4 * pct_above_50
+        return float(score)
+
+    def compute_put_call_ratio(self, options_data: pd.DataFrame) -> float:
+        """Compute put/call ratio given options volume data.
+
+        options_data expected columns: ['type' ('put'/'call'), 'volume']
         """
-    )
-
-    # Sidebar configuration
-    st.sidebar.header('Configuration')
-    tickers_input = st.sidebar.text_input('Tickers (séparés par des virgules)', ','.join(DEFAULT_TICKERS))
-    period = st.sidebar.selectbox('Période', ['1y', '2y', '5y', '10y', 'max'], index=2)
-    interval = st.sidebar.selectbox('Intervalle', ['1d', '1wk', '1mo'], index=0)
-    forecast_days = st.sidebar.slider('Forecast horizon (days)', min_value=1, max_value=30, value=7)
-    ma_window = st.sidebar.selectbox('MA window for extrapolation', [10, 20, 50, 100], index=1)
-    show_charts = st.sidebar.checkbox('Afficher graphiques', value=True)
-    show_indicators = st.sidebar.checkbox('Afficher indicateurs techniques', value=True)
-    show_forecast = st.sidebar.checkbox('Afficher forecasts', value=True)
-    show_correlation = st.sidebar.checkbox('Afficher corrélation multi-tickers', value=True)
-    export_all = st.sidebar.checkbox('Permettre export CSV/XLSX', value=True)
-
-    # Prepare ticker list
-    tickers = [t.strip().upper() for t in tickers_input.split(',') if t.strip()]
-    if not tickers:
-        st.error('Aucun ticker fourni. Entrez au moins un ticker.')
-        return
-
-    # Config dictionary
-    conf = {'forecast_days': forecast_days, 'ma_window': ma_window}
-
-    # Containers for summary
-    all_results = {}
-
-    # Iterate tickers and run pipeline
-    for ticker in tickers:
-        st.header(f'🔎 Analyse — {ticker}')
-        with st.spinner(f'Récupération et calculs pour {ticker}...'):
-            res = analyze_ticker_pipeline(ticker, period, interval, conf)
-        if res['df'].empty:
-            st.warning(f'Pas de données pour {ticker}.')
-            continue
-
-        df = res['df']
-        ratios_df = res['ratios']
-        fundamentals = res['fundamentals']
-        linear_fc = res['forecasts'].get('linear', pd.DataFrame())
-        ma_fc = res['forecasts'].get('ma', pd.DataFrame())
-
-        # Show recent raw data
-        st.subheader('Données historiques (extrait)')
-        st.dataframe(df[['Open', 'High', 'Low', 'Close', 'Volume']].tail(10))
-
-        # Summary KPIs in columns
-        k1, k2, k3, k4 = st.columns(4)
         try:
-            k1.metric('Prix courant', format_large_number(ratios_df.at[0, 'Current Price']))
+            puts = options_data[options_data['type']=='put']['volume'].sum()
+            calls = options_data[options_data['type']=='call']['volume'].sum()
+            return safe_div(puts, calls)
         except Exception:
-            k1.metric('Prix courant', 'N/A')
-        try:
-            k2.metric('Market Cap', format_large_number(ratios_df.at[0, 'Market Cap']))
-        except Exception:
-            k2.metric('Market Cap', 'N/A')
-        try:
-            k3.metric('Trailing P/E', format_large_number(ratios_df.at[0, 'Trailing P/E']))
-        except Exception:
-            k3.metric('Trailing P/E', 'N/A')
-        try:
-            k4.metric('Beta', format_large_number(ratios_df.at[0, 'Beta']))
-        except Exception:
-            k4.metric('Beta', 'N/A')
+            return np.nan
 
-        # Charts and indicators
-        if show_charts:
-            st.subheader('Graphiques prix & indicateurs')
-            plot_price_with_sma(df, ticker, ma_windows=[20,50,100])
-            plot_volume_and_obv(df, ticker)
-            plot_candlestick_with_bands(df, ticker)
-
-        if show_indicators:
-            st.subheader('Indicateurs techniques détaillés')
-            plot_rsi(df, ticker)
-            plot_macd(df, ticker)
-            plot_return_distribution(df, ticker)
-
-        # Forecasts
-        if show_forecast:
-            st.subheader('Forecasts simples et scénarios')
-            if not linear_fc.empty:
-                st.write('Linear trend forecast (next {} days)'.format(forecast_days))
-                st.dataframe(linear_fc)
-                # Plot forecast with historical
-                fig = go.Figure()
-                fig.add_trace(go.Scatter(x=df.index, y=df['Close'], name='Historical'))
-                fig.add_trace(go.Scatter(x=linear_fc.index, y=linear_fc['Forecast'], name='Linear Forecast'))
-                st.plotly_chart(fig, use_container_width=True)
-            if not ma_fc.empty:
-                st.write('MA extrapolation forecast (next {} days)'.format(forecast_days))
-                st.dataframe(ma_fc)
-                fig2 = go.Figure()
-                fig2.add_trace(go.Scatter(x=df.index[-200:], y=df['Close'].tail(200), name='Recent Historical'))
-                fig2.add_trace(go.Scatter(x=ma_fc.index, y=ma_fc['Forecast_MA_Extrap'], name='MA Extrap Forecast'))
-                st.plotly_chart(fig2, use_container_width=True)
-
-        # Ratios & fundamentals display
-        st.subheader('Ratios financiers & Fundamentals')
-        if not ratios_df.empty:
-            pretty = pretty_format_ratios(ratios_df)
-            st.dataframe(pretty.T)
+    def regime_label(self, vix_series: pd.Series, benchmark_series: pd.Series) -> str:
+        """Return a small label like 'Bull / Volatility Low'"""
+        iv_rank = self.compute_iv_rank(vix_series)
+        trend = self.market_trend_score(benchmark_series)
+        label = []
+        # Trend
+        if trend is np.nan or math.isnan(trend):
+            label.append('Trend: N/A')
+        elif trend > 60:
+            label.append('Bull')
+        elif trend < 40:
+            label.append('Bear')
         else:
-            st.write('Pas de ratios disponibles.')
+            label.append('Neutral')
+        # Vol
+        if iv_rank is np.nan or math.isnan(iv_rank):
+            label.append('IV: N/A')
+        elif iv_rank < 30:
+            label.append('Volatility Low')
+        elif iv_rank > 70:
+            label.append('Volatility High')
+        else:
+            label.append('Volatility Mid')
+        return ' / '.join(label)
 
-        # Export per-ticker
-        if export_all:
-            st.subheader('Exports')
-            export_df_to_csv(df, f"{ticker}_history")
-            # Excel with multiple sheets: df + ratios + forecasts
-            dfs_to_export = {f"{ticker}_history": df}
-            try:
-                dfs_to_export[f"{ticker}_ratios"] = ratios_df
-            except Exception:
-                pass
-            try:
-                if not linear_fc.empty:
-                    dfs_to_export[f"{ticker}_linear_fc"] = linear_fc
-                if not ma_fc.empty:
-                    dfs_to_export[f"{ticker}_ma_fc"] = ma_fc
-            except Exception:
-                pass
-            export_dfs_to_excel(dfs_to_export, filename=f"{ticker}_export")
 
-        # Save for multi-ticker summary
-        all_results[ticker] = res
+# ---------------------------------------------------------------------------
+# Module 3: Quantitative Screener
+# ---------------------------------------------------------------------------
 
-    # Multi-ticker correlation
-    if show_correlation and len(all_results) > 1:
-        st.header('📉 Corrélations et comparaison multi-tickers')
-        df_dict = {t: all_results[t]['df'] for t in all_results}
-        tickers_present = list(df_dict.keys())
-        plot_correlation_matrix(df_dict, tickers_present)
+@dataclass
+class ScreenerConfig:
+    pe_max: Optional[float] = None
+    ev_ebitda_max: Optional[float] = None
+    roe_min: Optional[float] = None
+    debt_equity_max: Optional[float] = None
+    momentum_6m_min: Optional[float] = None
+    volatility_max: Optional[float] = None
+    score_weights: Dict[str, float] = field(default_factory=lambda: {
+        'quality': 0.4, 'value': 0.3, 'momentum': 0.3
+    })
 
-        # Plot cumulative returns comparison
-        st.subheader('Comparaison des rendements cumulés')
-        cumret_df = pd.DataFrame({t: df_dict[t]['CumulativeReturn'] for t in tickers_present})
-        fig = go.Figure()
-        for t in tickers_present:
-            fig.add_trace(go.Scatter(x=cumret_df.index, y=cumret_df[t], name=t))
-        fig.update_layout(title='Comparaison Cumulative Returns', xaxis_title='Date', yaxis_title='Cumulative Return')
-        st.plotly_chart(fig, use_container_width=True)
 
-        # Multi-ticker summary table
-        st.subheader('Tableau synthèse multi-tickers')
+class Screener:
+    """
+    Quantitative screener that scores tickers across multiple factors.
+
+    The screener performs per-ticker factor computation and returns a DataFrame
+    with factor values and an aggregated score that can be sorted/filtered.
+    """
+
+    def __init__(self, data_engine: DataEngine, config: ScreenerConfig = ScreenerConfig()):
+        self.de = data_engine
+        self.config = config
+
+    def compute_factors(self, ticker: str, period: str = '1y') -> Dict[str, Any]:
+        """Compute factor values for one ticker (value, quality, momentum, volatility)."""
+        # Fetch fundamentals & prices
+        fund = self.de.fetch_fundamentals(ticker)
+        hist = self.de.fetch_history(ticker, period=period)
+        out: Dict[str, Any] = {}
+        # Value factors
+        out['PE'] = fund.get('trailingPE', np.nan)
+        out['PriceToBook'] = fund.get('priceToBook', np.nan)
+        out['EV_EBITDA'] = fund.get('enterpriseToEbitda', np.nan)
+        # Quality
+        out['ROE'] = fund.get('returnOnEquity', np.nan)
+        out['DebtEquity'] = fund.get('debtToEquity', np.nan)
+        # Momentum: 6 months return
+        try:
+            ret_6m = hist['Close'].pct_change().rolling(window=126).apply(lambda x: (1+x).prod()-1).dropna()
+            out['Mom6M'] = ret_6m.iloc[-1] if len(ret_6m) else np.nan
+        except Exception:
+            out['Mom6M'] = np.nan
+        # Volatility: annualized std
+        out['Volatility'] = hist['Close'].pct_change().std() * math.sqrt(252) if len(hist)>10 else np.nan
+        # Score composition
+        out['Score'] = self.aggregate_score(out)
+        out['Ticker'] = ticker
+        return out
+
+    def aggregate_score(self, factor_values: Dict[str, Any]) -> float:
+        """Create a composite score using config weights.
+
+        Expected keys in factor_values: ROE, PE, Mom6M, EV_EBITDA, DebtEquity
+        The function normalizes each factor to a 0-1 scale using simple heuristics.
+        """
+        try:
+            # Quality score (higher ROE better, lower DebtEquity better)
+            roe = factor_values.get('ROE', np.nan) or 0
+            de = factor_values.get('DebtEquity', np.nan) or 100
+            q_score = (np.tanh((roe/0.15)) + (1 - np.tanh(de/1.0))) / 2
+            # Value score (lower PE and EV/EBITDA better)
+            pe = factor_values.get('PE', np.nan) or 1000
+            ev = factor_values.get('EV_EBITDA', np.nan) or 1000
+            v_score = (1 / (1 + np.log1p(pe))) * 0.6 + (1 / (1 + np.log1p(ev))) * 0.4
+            # Momentum score (higher is better)
+            mom = factor_values.get('Mom6M', 0) or 0
+            m_score = min(max((mom + 1) / 2, 0), 1)
+            weights = self.config.score_weights
+            total = weights['quality'] * q_score + weights['value'] * v_score + weights['momentum'] * m_score
+            return float(total)
+        except Exception as e:
+            logger.error(f"Error aggregating score: {e}")
+            return 0.0
+
+    def run_screener(self, tickers: List[str], period: str = '1y') -> pd.DataFrame:
         rows = []
-        for t in tickers_present:
-            r = all_results[t]['ratios']
-            if r.empty:
+        for t in tickers:
+            try:
+                fv = self.compute_factors(t, period=period)
+                rows.append(fv)
+            except Exception as e:
+                logger.warning(f"Skipping {t} due to error: {e}")
+        if not rows:
+            return pd.DataFrame()
+        df = pd.DataFrame(rows).set_index('Ticker')
+        df = df.sort_values(by='Score', ascending=False)
+        return df
+
+
+# ---------------------------------------------------------------------------
+# Module 4: Tactical Analyzer (single-asset deep analysis & pair trading)
+# ---------------------------------------------------------------------------
+
+class TacticalAnalyzer:
+    """
+    Detailed per-asset analysis and pairs trading utilities.
+
+    Features:
+    - Price charting helpers
+    - Volatility (historical vs implied if available)
+    - Z-score calculations for price and spread
+    - Cointegration (ADF) test for pair trading
+    """
+
+    def __init__(self, data_engine: DataEngine):
+        self.de = data_engine
+
+    def zscore(self, series: pd.Series, window: int = 200) -> pd.Series:
+        mean = series.rolling(window).mean()
+        std = series.rolling(window).std()
+        return (series - mean) / std
+
+    def pair_spread(self, series_x: pd.Series, series_y: pd.Series, method: str = 'ratio') -> pd.Series:
+        """Return the spread between two series; method: 'ratio' or 'diff'."""
+        s_x = series_x.dropna()
+        s_y = series_y.dropna()
+        # Align indexes
+        df = pd.concat([s_x, s_y], axis=1).dropna()
+        if df.shape[0] < 10:
+            return pd.Series(dtype=float)
+        if method == 'ratio':
+            return df.iloc[:,0] / df.iloc[:,1]
+        else:
+            return df.iloc[:,0] - df.iloc[:,1]
+
+    def adf_test(self, series: pd.Series) -> Dict[str, Any]:
+        """Run Augmented Dickey-Fuller test and return statistic and p-value."""
+        try:
+            res = adfuller(series.dropna())
+            return {'adf_stat': res[0], 'pvalue': res[1], 'usedlag': res[2], 'nobs': res[3]}
+        except Exception as e:
+            logger.error(f"ADF test error: {e}")
+            return {'adf_stat': np.nan, 'pvalue': np.nan}
+
+    def analyze_ticker(self, ticker: str, period: str = '2y') -> Dict[str, Any]:
+        hist = self.de.fetch_history(ticker, period=period)
+        if hist.empty:
+            return {}
+        close = hist['Close']
+        z = self.zscore(close)
+        return {'history': hist, 'zscore': z}
+
+    def analyze_pair(self, ticker_a: str, ticker_b: str, period: str = '2y') -> Dict[str, Any]:
+        a = self.de.fetch_history(ticker_a, period=period)['Close']
+        b = self.de.fetch_history(ticker_b, period=period)['Close']
+        spread = self.pair_spread(a, b, method='ratio')
+        z = self.zscore(spread, window=100)
+        adf = self.adf_test(spread)
+        return {'spread': spread, 'zscore': z, 'adf': adf}
+
+
+# ---------------------------------------------------------------------------
+# Module 5: Portfolio Analysis & Risk Management
+# ---------------------------------------------------------------------------
+
+@dataclass
+class Position:
+    ticker: str
+    quantity: float
+    entry_price: float
+    entry_date: Optional[pd.Timestamp] = None
+
+
+class Portfolio:
+    """
+    Simple portfolio container to compute P&L, VaR, drawdown, and attribution.
+    This is a prototyping class for analytics rather than execution.
+    """
+
+    def __init__(self, positions: Optional[List[Position]] = None, cash: float = 0.0):
+        self.positions = positions or []
+        self.cash = cash
+
+    def market_value(self, price_map: Dict[str, float]) -> float:
+        mv = 0.0
+        for pos in self.positions:
+            price = price_map.get(pos.ticker, pos.entry_price)
+            mv += pos.quantity * price
+        return mv + self.cash
+
+    def current_pnl(self, price_map: Dict[str, float]) -> float:
+        pnl = 0.0
+        for pos in self.positions:
+            price = price_map.get(pos.ticker, pos.entry_price)
+            pnl += pos.quantity * (price - pos.entry_price)
+        return pnl
+
+    def to_dataframe(self) -> pd.DataFrame:
+        rows = []
+        for p in self.positions:
+            rows.append({'Ticker': p.ticker, 'Qty': p.quantity, 'Entry': p.entry_price, 'EntryDate': p.entry_date})
+        return pd.DataFrame(rows)
+
+
+class RiskEngine:
+    """
+    Risk analytics: portfolio VaR (parametric & historical), drawdowns, sharpe, sortino.
+    """
+
+    @staticmethod
+    def historical_var(returns: pd.Series, alpha: float = 0.05) -> float:
+        if returns.empty:
+            return np.nan
+        return -np.quantile(returns.dropna(), alpha)
+
+    @staticmethod
+    def parametric_var(returns: pd.Series, alpha: float = 0.05) -> float:
+        if returns.empty:
+            return np.nan
+        mu = returns.mean()
+        sigma = returns.std()
+        z = abs(scipy.stats.norm.ppf(alpha)) if 'scipy' in globals() else 1.645
+        return -(mu - z * sigma)
+
+    @staticmethod
+    def max_drawdown(equity_curve: pd.Series) -> float:
+        roll_max = equity_curve.cummax()
+        drawdown = (equity_curve - roll_max) / roll_max
+        return drawdown.min()
+
+    @staticmethod
+    def sharpe_ratio(returns: pd.Series, rf_rate_annual: float = 0.0) -> float:
+        if returns.empty:
+            return np.nan
+        rf_daily = (1 + rf_rate_annual) ** (1/252) - 1
+        excess = returns - rf_daily
+        return safe_div(excess.mean() * math.sqrt(252), excess.std())
+
+    @staticmethod
+    def sortino_ratio(returns: pd.Series, rf_rate_annual: float = 0.0) -> float:
+        if returns.empty:
+            return np.nan
+        rf_daily = (1 + rf_rate_annual) ** (1/252) - 1
+        excess = returns - rf_daily
+        downside = excess[excess < 0]
+        downside_std = downside.std()
+        return safe_div(excess.mean() * math.sqrt(252), downside_std)
+
+
+# ---------------------------------------------------------------------------
+# Module 6: Backtesting Engine (simple event-driven backtest skeleton)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class Trade:
+    ticker: str
+    date: pd.Timestamp
+    quantity: float
+    price: float
+    side: str  # 'buy' / 'sell'
+
+
+class BacktestResult:
+    def __init__(self):
+        self.equity_curve = pd.Series(dtype=float)
+        self.trades: List[Trade] = []
+        self.metrics: Dict[str, Any] = {}
+
+
+class Strategy:
+    """
+    Abstract base class for strategies. Implement `generate_signals` and optionally `on_fill`.
+    """
+    def __init__(self, name: str = 'abstract'):
+        self.name = name
+
+    def generate_signals(self, data: pd.DataFrame) -> pd.DataFrame:
+        """Takes historical OHLCV and returns a DataFrame with columns 'signal' (1 buy, -1 sell, 0 hold).
+
+        This method must be implemented by subclasses.
+        """
+        raise NotImplementedError
+
+    def on_fill(self, trade: Trade):
+        """Optional hook called when a trade is executed (for stateful strategies)."""
+        pass
+
+
+class SMA_Crossover_Strategy(Strategy):
+    """Example strategy: SMA short/long crossover."""
+    def __init__(self, short_window: int = 50, long_window: int = 200):
+        super().__init__(name=f"SMA_{short_window}_{long_window}")
+        self.short = short_window
+        self.long = long_window
+
+    def generate_signals(self, data: pd.DataFrame) -> pd.DataFrame:
+        df = data.copy()
+        df['sma_short'] = df['Close'].rolling(self.short).mean()
+        df['sma_long'] = df['Close'].rolling(self.long).mean()
+        df['signal'] = 0
+        df.loc[df['sma_short'] > df['sma_long'], 'signal'] = 1
+        df.loc[df['sma_short'] < df['sma_long'], 'signal'] = -1
+        return df[['signal']]
+
+
+class SimpleBacktester:
+    """
+    Naive backtester: assumes fills at next open price and fixed position sizing per trade.
+    Produces equity curve and trade list. Useful for quick hypothesis testing.
+    """
+    def __init__(self, initial_capital: float = 100000.0):
+        self.initial_capital = initial_capital
+
+    def run(self, price_df: pd.DataFrame, signals: pd.DataFrame, ticker: str, position_size: float = 0.1) -> BacktestResult:
+        # price_df: index datetime with columns Open/High/Low/Close/Volume
+        # signals: index datetime with 'signal'
+        res = BacktestResult()
+        df = price_df.join(signals, how='left').fillna(method='ffill').fillna(0)
+        cash = self.initial_capital
+        position = 0.0
+        equity_hist = []
+        dates = []
+        for idx, row in df.iterrows():
+            sig = row.get('signal', 0)
+            price = row.get('Open', row.get('Close', np.nan))
+            if np.isnan(price):
+                equity_hist.append(cash + position * 0.0)
+                dates.append(idx)
                 continue
-            r = r.iloc[0].to_dict()
-            rows.append(r)
-        if rows:
-            summary_df = pd.DataFrame(rows)
-            st.dataframe(summary_df)
-            if export_all:
-                export_df_to_csv(summary_df, 'multi_ticker_summary')
-                export_dfs_to_excel({'multi_ticker_summary': summary_df}, filename='multi_ticker_summary')
+            # Entry
+            if sig == 1 and position == 0:
+                # buy with fixed fraction of capital
+                alloc = cash * position_size
+                qty = alloc / price if price > 0 else 0
+                cash -= qty * price
+                position += qty
+                trade = Trade(ticker=ticker, date=idx, quantity=qty, price=price, side='buy')
+                res.trades.append(trade)
+            # Exit
+            elif sig == -1 and position > 0:
+                cash += position * price
+                trade = Trade(ticker=ticker, date=idx, quantity=position, price=price, side='sell')
+                res.trades.append(trade)
+                position = 0
+            equity = cash + position * price
+            equity_hist.append(equity)
+            dates.append(idx)
+        res.equity_curve = pd.Series(equity_hist, index=dates)
+        # Compute metrics
+        ret = res.equity_curve.pct_change().dropna()
+        res.metrics['CAGR'] = ((res.equity_curve.iloc[-1] / res.equity_curve.iloc[0]) ** (252.0 / len(res.equity_curve)) - 1) if len(res.equity_curve)>1 else np.nan
+        res.metrics['Sharpe'] = safe_div(ret.mean() * math.sqrt(252), ret.std()) if not ret.empty else np.nan
+        res.metrics['MaxDrawdown'] = RiskEngine.max_drawdown(res.equity_curve)
+        return res
 
-    # Final notes and footer
-    st.markdown('---')
-    st.markdown("""
-**Notes:** This application uses simple, transparent forecasting models
-for pedagogical purposes. For production-grade forecasting use proper
-time-series models (ARIMA, Prophet, LSTM) and validate statistically.
-""")
+
+# ---------------------------------------------------------------------------
+# Repo skeleton generation and project scaffolding helpers
+# ---------------------------------------------------------------------------
+
+def create_repo_skeleton(path: str = './quant_project'):
+    """Create a basic repository layout for the quant project.
+
+    This function is intentionally minimal to avoid filesystem side effects in tests.
+    """
+    import os
+    os.makedirs(path, exist_ok=True)
+    subdirs = ['data', 'notebooks', 'src', 'tests', 'docs']
+    for sd in subdirs:
+        os.makedirs(f"{path}/{sd}", exist_ok=True)
+    readme = f"{path}/README.md"
+    if not os.path.exists(readme):
+        with open(readme, 'w') as f:
+            f.write('# Quant Project\n\nRepository scaffolded by quant_trading_skeleton.py')
+    logger.info(f"Created repo skeleton at {path}")
 
 
-# ----------------------------------------------------------------------
-# Run app
-# ----------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Example Streamlit demo (very simple dashboard using the modules above)
+# ---------------------------------------------------------------------------
+
+def streamlit_demo():
+    if not STREAMLIT_AVAILABLE:
+        print('Streamlit not available in this environment. Skipping demo.')
+        return
+    st.set_page_config(layout='wide')
+    st.title('Quant Platform - Demo')
+
+    de = DataEngine()
+    md = MarketRegimeDashboard(de)
+    sc = Screener(de)
+    ta = TacticalAnalyzer(de)
+
+    # Sidebar
+    tickers = st.sidebar.text_input('Tickers (comma separated)', 'AAPL,MSFT,TSLA')
+    period = st.sidebar.selectbox('Period', ['1y','2y','5y'], index=2)
+    tick_list = [t.strip().upper() for t in tickers.split(',') if t.strip()]
+
+    st.sidebar.write('Universes')
+    if st.sidebar.button('Create sample universe'):
+        de.create_universe('sample', tick_list)
+        st.sidebar.success('Universe created')
+
+    # Screener run
+    if st.sidebar.button('Run Screener'):
+        with st.spinner('Running screener...'):
+            df = sc.run_screener(tick_list, period=period)
+            st.subheader('Screener Results')
+            st.dataframe(df)
+
+    # Single ticker deep analysis
+    ticker = st.sidebar.selectbox('Deep analyze', tick_list)
+    if ticker:
+        with st.spinner('Fetching data...'):
+            res = ta.analyze_ticker(ticker, period='2y')
+            if res:
+                st.subheader(f'{ticker} Price')
+                hist = res['history']
+                fig = go.Figure(data=[go.Scatter(x=hist.index, y=hist['Close'], name='Close')])
+                st.plotly_chart(fig, use_container_width=True)
+                st.subheader('Z-Score')
+                st.line_chart(res['zscore'])
+
+
+# ---------------------------------------------------------------------------
+# If run as script, provide a CLI-style quick demo
+# ---------------------------------------------------------------------------
 
 if __name__ == '__main__':
-    main_app()
-
-# End of file
-# This file is intentionally long, commented and educational. You can trim
-# sections you don't need, or modularize into multiple files for production.
+    # Quick demo of creating skeletons and running a minimal flow
+    print('Quant trading skeleton module. Running a quick demo...')
+    create_repo_skeleton('./quant_project_demo')
+    de = DataEngine()
+    # sample tickers
+    tickers = ['AAPL', 'MSFT']
+    de.create_universe('tech_us', tickers)
+    sc = Screener(de)
+    df = sc.run_screener(tickers, period='1y')
+    print('Screener results (head):')
+    print(df.head())
+    print('\nTo run the Streamlit demo, execute: streamlit run quant_trading_skeleton.py')
