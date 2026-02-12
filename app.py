@@ -40,7 +40,7 @@ ZONES = {
 
 @st.cache_data(ttl=3600)
 def get_real_gas_data():
-    """Récupère 2 ans de prix Gaz TTF (Benchmark de liquidité européen pour le PEG)"""
+    """Récupère 2 ans de prix Gaz TTF (Benchmark de liquidité européen)"""
     try:
         data = yf.download("TTF=F", period="2y", interval="1d", progress=False)
         if isinstance(data.columns, pd.MultiIndex):
@@ -55,18 +55,23 @@ def get_real_gas_data():
 
 @st.cache_data(ttl=3600)
 def get_real_elec_data_fr():
-    """Récupère les prix Spot Electricité Zone FRANCE (FR) via SMARD API"""
-    # 410 = Day Ahead, Region FR = France
+    """Récupère les prix Spot Electricité Zone FRANCE via SMARD API avec recherche récursive"""
     index_url = "https://www.smard.de/app/chart_data/410/FR/index_hour.json"
     try:
         idx_res = requests.get(index_url, timeout=5).json()
-        last_ts = idx_res['timestamps'][-1]
-        data_url = f"https://www.smard.de/app/chart_data/410/FR/410_FR_hour_{last_ts}.json"
-        data_res = requests.get(data_url, timeout=5).json()
-        df = pd.DataFrame(data_res['series'], columns=['Timestamp', 'Elec_Price'])
-        df['Timestamp'] = pd.to_datetime(df['Timestamp'], unit='ms')
-        df = df.set_index('Timestamp').resample('D').mean()
-        return df
+        timestamps = idx_res['timestamps']
+        
+        # On tente de récupérer les données en remontant les 5 derniers timestamps de l'index
+        # car le plus récent peut être un fichier vide en cours de génération
+        for ts in reversed(timestamps[-5:]):
+            data_url = f"https://www.smard.de/app/chart_data/410/FR/410_FR_hour_{ts}.json"
+            data_res = requests.get(data_url, timeout=5).json()
+            if 'series' in data_res and len(data_res['series']) > 0:
+                df = pd.DataFrame(data_res['series'], columns=['Timestamp', 'Elec_Price'])
+                df['Timestamp'] = pd.to_datetime(df['Timestamp'], unit='ms')
+                df = df.set_index('Timestamp').resample('D').mean()
+                return df
+        return pd.DataFrame()
     except:
         return pd.DataFrame()
 
@@ -87,7 +92,7 @@ def get_real_weather_archive(lat, lon):
 
 # --- INTERFACE ---
 
-st.sidebar.title("Volt-Alpha Pro v5.1")
+st.sidebar.title("Volt-Alpha Pro v5.2")
 st.sidebar.markdown(f"**Analyste :** Florentin Gaugry\n*Titulaire du Master 2 Finance et Banque de la TSM*")
 st.sidebar.divider()
 
@@ -135,7 +140,7 @@ with st.spinner("Extraction et synchronisation des flux France..."):
             if 'Elec_Price' in master_df.columns:
                 st.metric("Élec Spot France", f"{master_df['Elec_Price'].iloc[-1]:.2f} €")
             else:
-                st.metric("Élec Spot France", "N/A", delta="Flux HS", delta_color="inverse")
+                st.metric("Élec Spot France", "N/A", delta="Donnée Indisponible", delta_color="inverse")
         with k3:
             st.metric("Température Zone", f"{master_df['Temp'].iloc[-1]:.1f} °C")
         with k4:
@@ -189,13 +194,12 @@ with st.spinner("Extraction et synchronisation des flux France..."):
                 )
                 st.plotly_chart(fig_scat, use_container_width=True)
             else:
-                st.info("L'analyse de dispersion électrique est indisponible car le flux SMARD est vide.")
+                st.warning("⚠️ L'analyse de dispersion électrique est momentanément indisponible car le flux EPEX SPOT (via SMARD) renvoie des données vides pour la zone FR.")
             
         with col_right:
             st.subheader("Audit des Statistiques par Zone")
             st.write(f"Séries temporelles sur 24 mois pour la zone **{selected_zone}** :")
             
-            # Fix : Sélection dynamique des colonnes pour éviter le KeyError si un flux manque
             available_cols = [c for c in ['Gas_Price', 'Elec_Price', 'Temp'] if c in master_df.columns]
             stats = master_df[available_cols].describe().T
             st.dataframe(stats.style.format("{:.2f}"))
@@ -208,4 +212,4 @@ with st.spinner("Extraction et synchronisation des flux France..."):
         st.error("Échec de la synchronisation des flux réels. Vérifiez les sources en barre latérale.")
 
 st.divider()
-st.caption("Volt-Alpha Pro v5.1 | Terminal d'observation fondamentale pour analystes financiers.")
+st.caption("Volt-Alpha Pro v5.2 | Moteur de recherche récursif pour la résilience des flux Spot.")
