@@ -32,7 +32,7 @@ ZONES = {
     "Lyon (Auvergne-Rhône-Alpes)": {"lat": 45.7640, "lon": 4.8357},
     "Paris (Île-de-France)": {"lat": 48.8566, "lon": 2.3522},
     "Marseille (PACA)": {"lat": 43.2965, "lon": 5.3698},
-    "Lille (Hauts-de-France)": {"lat": 50.6292, "lon": 3.0573},
+    "Lille (Hauts-DE-France)": {"lat": 50.6292, "lon": 3.0573},
     "Strasbourg (Grand Est)": {"lat": 48.5734, "lon": 7.7521}
 }
 
@@ -134,6 +134,8 @@ with st.spinner("Extraction et synchronisation des flux France..."):
         with k2:
             if 'Elec_Price' in master_df.columns:
                 st.metric("Élec Spot France", f"{master_df['Elec_Price'].iloc[-1]:.2f} €")
+            else:
+                st.metric("Élec Spot France", "N/A", delta="Flux HS", delta_color="inverse")
         with k3:
             st.metric("Température Zone", f"{master_df['Temp'].iloc[-1]:.1f} °C")
         with k4:
@@ -186,11 +188,16 @@ with st.spinner("Extraction et synchronisation des flux France..."):
                     color_continuous_scale="RdBu_r"
                 )
                 st.plotly_chart(fig_scat, use_container_width=True)
+            else:
+                st.info("L'analyse de dispersion électrique est indisponible car le flux SMARD est vide.")
             
         with col_right:
             st.subheader("Audit des Statistiques par Zone")
             st.write(f"Séries temporelles sur 24 mois pour la zone **{selected_zone}** :")
-            stats = master_df[['Gas_Price', 'Elec_Price', 'Temp']].describe().T
+            
+            # Fix : Sélection dynamique des colonnes pour éviter le KeyError si un flux manque
+            available_cols = [c for c in ['Gas_Price', 'Elec_Price', 'Temp'] if c in master_df.columns]
+            stats = master_df[available_cols].describe().T
             st.dataframe(stats.style.format("{:.2f}"))
             
             # Diagnostic Professionnel
