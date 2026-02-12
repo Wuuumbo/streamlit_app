@@ -182,8 +182,18 @@ with st.spinner("Analyse quantitative en cours..."):
             template="plotly_dark",
             height=600,
             hovermode="x unified",
-            yaxis=dict(title="Prix Final Estimé (€/MWh)", titlefont=dict(color="#ff4b4b"), tickfont=dict(color="#ff4b4b")),
-            yaxis2=dict(title="Degrés Jours Unifiés (DJU)", titlefont=dict(color="#00d4ff"), tickfont=dict(color="#00d4ff"), overlaying="y", side="right"),
+            yaxis=dict(
+                title_text="Prix Final Estimé (€/MWh)", 
+                title_font=dict(color="#ff4b4b"), 
+                tickfont=dict(color="#ff4b4b")
+            ),
+            yaxis2=dict(
+                title_text="Degrés Jours Unifiés (DJU)", 
+                title_font=dict(color="#00d4ff"), 
+                tickfont=dict(color="#00d4ff"), 
+                overlaying="y", 
+                side="right"
+            ),
             legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
         )
         
@@ -225,4 +235,4 @@ with st.spinner("Analyse quantitative en cours..."):
         st.error("Échec de la récupération des données. Les serveurs yfinance ou Open-Meteo sont peut-être surchargés.")
 
 st.divider()
-st.caption("Volt-Alpha v3.0 | Moteur de backtesting quantitatif pour analystes financiers.")
+st.caption("Volt-Alpha v3.1 | Moteur de backtesting quantitatif corrigé pour analystes financiers.")
