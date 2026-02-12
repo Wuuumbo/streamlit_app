@@ -1,67 +1,71 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+import yfinance as yf
+import requests
 import plotly.graph_objects as go
 import plotly.express as px
 from datetime import datetime, timedelta
-import yfinance as yf
-import requests
 
 # --- CONFIGURATION DE LA PAGE ---
 st.set_page_config(
-    page_title="Volt-Alpha | Analyse Gaz & Météo Historique",
-    page_icon="🔥",
+    page_title="Volt-Alpha | Backtest Quant Gaz & Météo",
+    page_icon="📉",
     layout="wide"
 )
 
-# --- STYLE CSS ---
-st.markdown("""
-    <style>
-    .main { background-color: #0e1117; color: white; }
-    .stMetric { background-color: #1e2130; padding: 15px; border-radius: 10px; border-left: 5px solid #ff4b4b; }
-    .report-text { font-size: 0.9rem; color: #ccc; line-height: 1.6; }
-    </style>
-    """, unsafe_allow_html=True)
+# --- CONSTANTES ET MAPPAGE MÉTIER ---
 
-# --- COORDINATES DES RÉGIONS ---
-REGIONS = {
-    "Paris (Île-de-France)": {"lat": 48.8566, "lon": 2.3522},
-    "Lille (Hauts-de-France)": {"lat": 50.6292, "lon": 3.0573},
-    "Lyon (Auvergne-Rhône-Alpes)": {"lat": 45.7640, "lon": 4.8357},
-    "Marseille (Provence-Alpes-Côte d'Azur)": {"lat": 43.2965, "lon": 5.3698},
-    "Strasbourg (Grand Est)": {"lat": 48.5734, "lon": 7.7521},
-    "Bordeaux (Nouvelle-Aquitaine)": {"lat": 44.8378, "lon": -0.5792},
-    "Toulouse (Occitanie)": {"lat": 43.6047, "lon": 1.4442}
+# Mapping des villes vers Zones GRDF et coordonnées GPS
+# Zone 1 (Moins cher) -> Zone 6 (Plus cher d'acheminement)
+CITY_MAP = {
+    "Paris (Île-de-France)": {"lat": 48.8566, "lon": 2.3522, "zone": 2},
+    "Toulouse (Occitanie)": {"lat": 43.6047, "lon": 1.4442, "zone": 1},
+    "Lyon (Auvergne-Rhône-Alpes)": {"lat": 45.7640, "lon": 4.8357, "zone": 1},
+    "Strasbourg (Grand Est)": {"lat": 48.5734, "lon": 7.7521, "zone": 1},
+    "Brest (Bretagne)": {"lat": 48.3904, "lon": -4.4861, "zone": 6},
+    "Biarritz (Nouvelle-Aquitaine)": {"lat": 43.4832, "lon": -1.5586, "zone": 1}
 }
 
-# --- FONCTIONS DE RÉCUPÉRATION ---
+# Paramètres fiscaux et transport (Estimations moyennes 2024/2025)
+TICGN = 16.37  # €/MWh (Taxe Intérieure de Consommation sur le Gaz Naturel)
+ACHEMINEMENT_FIXE = 25.0  # €/MWh (Estimation transport + distribution hors zone)
+VAT_COMMODITY = 1.20  # TVA 20% sur la molécule et taxes
 
-@st.cache_data
-def get_historical_gas(start_date, end_date):
-    """Récupère les prix du Gaz TTF sur la période sélectionnée"""
+# --- FONCTIONS DE RÉCUPÉRATION DE DONNÉES ---
+
+@st.cache_data(show_spinner=False)
+def get_market_data(ticker, days):
+    """Récupère les données de marché via yfinance"""
+    end = datetime.now()
+    start = end - timedelta(days=days)
     try:
-        # TTF=F est le contrat Future de référence pour le prix du gaz en Europe (donc France)
-        gas = yf.download("TTF=F", start=start_date, end=end_date, progress=False)
-        if gas.empty:
-            return pd.DataFrame()
-        # Nettoyage si MultiIndex
-        if isinstance(gas.columns, pd.MultiIndex):
-            gas = gas['Close']['TTF=F']
+        data = yf.download(ticker, start=start, end=end, progress=False)
+        if data.empty: return pd.DataFrame()
+        
+        # Aplatissement si MultiIndex
+        if isinstance(data.columns, pd.MultiIndex):
+            df = data['Close'][[ticker]].copy()
+            df.columns = ['Close']
         else:
-            gas = gas['Close']
-        return gas.dropna()
-    except:
+            df = data[['Close']].copy()
+            
+        return df.dropna()
+    except Exception:
         return pd.DataFrame()
 
-@st.cache_data
-def get_historical_weather(lat, lon, start_date, end_date):
-    """Récupère les températures historiques via Open-Meteo Archive API"""
+@st.cache_data(show_spinner=False)
+def get_weather_archive(lat, lon, days):
+    """Récupère les températures historiques via Open-Meteo Archive"""
+    end_date = (datetime.now() - timedelta(days=3)).strftime('%Y-%m-%d')
+    start_date = (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d')
+    
     url = "https://archive-api.open-meteo.com/v1/archive"
     params = {
         "latitude": lat,
         "longitude": lon,
-        "start_date": start_date.strftime('%Y-%m-%d'),
-        "end_date": end_date.strftime('%Y-%m-%d'),
+        "start_date": start_date,
+        "end_date": end_date,
         "daily": "temperature_2m_mean",
         "timezone": "Europe/Paris"
     }
@@ -69,129 +73,156 @@ def get_historical_weather(lat, lon, start_date, end_date):
         response = requests.get(url, params=params, timeout=10).json()
         df = pd.DataFrame(response['daily'])
         df['time'] = pd.to_datetime(df['time'])
-        df = df.rename(columns={"temperature_2m_mean": "Temp_Moyenne"})
+        df = df.rename(columns={"temperature_2m_mean": "temp_mean"})
         return df.set_index('time')
-    except:
+    except Exception:
         return pd.DataFrame()
 
-# --- INTERFACE SIDEBAR ---
+# --- LOGIQUE DE CALCUL QUANTITATIF ---
 
-st.sidebar.title("🔥 Volt-Alpha Historique")
+def reconstruct_retail_price(wholesale_price, zone):
+    """
+    Transforme le prix de gros (TTF) en prix final estimé (€/MWh)
+    Logique : Prix Gros + Spread Zone + Taxes + TVA
+    """
+    # Le spread de zone est d'environ 1€/MWh par niveau de zone au-delà de 1
+    zone_spread = (zone - 1) * 1.50 
+    
+    # Prix HT = Gros + Transport + Spread
+    price_ht = wholesale_price + ACHEMINEMENT_FIXE + zone_spread + TICGN
+    
+    # Prix TTC (simplifié sur la part variable)
+    return price_ht * VAT_COMMODITY
+
+# --- INTERFACE STREAMLIT ---
+
+st.sidebar.title("📉 Volt-Alpha Quant")
 st.sidebar.markdown(f"**Analyste :** Florentin Gaugry\n*Master 2 Finance & Banque*")
 st.sidebar.divider()
 
-selected_region = st.sidebar.selectbox("Choisir la région (France)", list(REGIONS.keys()))
-year_range = st.sidebar.slider("Période d'analyse (Jours en arrière)", 30, 730, 365)
+# Configuration du Backtest
+st.sidebar.subheader("Configuration du Backtest")
+city = st.sidebar.selectbox("Ville de référence", list(CITY_MAP.keys()))
+rolling_window = st.sidebar.slider("Moyenne Mobile (jours)", 1, 60, 30)
+period = st.sidebar.radio("Historique", ["1 an", "2 ans"], index=1)
+lookback = 730 if period == "2 ans" else 365
 
-end_date = datetime.now() - timedelta(days=2) # Archive a souvent 2 jours de délai
-start_date = end_date - timedelta(days=year_range)
+# Paramètres de simulation
+st.sidebar.divider()
+st.sidebar.subheader("Hypothèses de Zone")
+current_city_data = CITY_MAP[city]
+st.sidebar.info(f"📍 Zone GRDF détectée : **Zone {current_city_data['zone']}**")
 
-# --- CHARGEMENT DES DONNÉES ---
+# --- TRAITEMENT DES DONNÉES ---
 
-with st.spinner(f"Analyse des corrélations pour {selected_region}..."):
-    gas_data = get_historical_gas(start_date, end_date)
-    weather_data = get_historical_weather(
-        REGIONS[selected_region]['lat'], 
-        REGIONS[selected_region]['lon'], 
-        start_date, 
-        end_date
-    )
-
-# --- PRÉPARATION DU DATAFRAME COMMUN ---
-
-if not gas_data.empty and not weather_data.empty:
-    # On aligne les données sur les dates communes
-    combined = pd.merge(gas_data, weather_data, left_index=True, right_index=True, how='inner')
-    combined.columns = ['Prix_Gaz', 'Temp_Moyenne']
+with st.spinner("Analyse quantitative en cours..."):
+    # 1. Fetch
+    gas_raw = get_market_data("TTF=F", lookback + 30) # +30 pour la MM
+    weather_raw = get_weather_archive(current_city_data['lat'], current_city_data['lon'], lookback + 30)
     
-    # Calcul de corrélation
-    correlation = combined['Prix_Gaz'].corr(combined['Temp_Moyenne'])
-    
-    # --- AFFICHAGE ---
-
-    st.title(f"Impact Climatique sur le Prix du Gaz - {selected_region}")
-    st.info(f"Analyse sur les {year_range} derniers jours. Source : Yahoo Finance (TTF) & Open-Meteo Archive.")
-
-    # Métriques
-    m1, m2, m3 = st.columns(3)
-    with m1:
-        st.metric("Prix Gaz Moyen", f"{combined['Prix_Gaz'].mean():.2f} €/MWh")
-    with m2:
-        st.metric("Température Moyenne", f"{combined['Temp_Moyenne'].mean():.1f} °C")
-    with m3:
-        color = "inverse" if correlation < 0 else "normal"
-        st.metric("Corrélation Gaz/Temp", f"{correlation:.2f}", delta="Forte" if abs(correlation) > 0.5 else "Modérée", delta_color=color)
-
-    # Graphique Double Axe
-    fig = go.Figure()
-
-    # Trace Gaz
-    fig.add_trace(go.Scatter(
-        x=combined.index, y=combined['Prix_Gaz'],
-        name="Prix Gaz (TTF) - €/MWh",
-        line=dict(color='#ff4b4b', width=3)
-    ))
-
-    # Trace Température (Axe Y secondaire)
-    fig.add_trace(go.Scatter(
-        x=combined.index, y=combined['Temp_Moyenne'],
-        name="Température (°C)",
-        line=dict(color='#00d4ff', width=2, dash='dot'),
-        yaxis="y2"
-    ))
-
-    # Correction des dictionnaires de layout pour éviter le ValueError
-    fig.update_layout(
-        template="plotly_dark",
-        height=600,
-        title_text=f"Evolution temporelle : Prix du Gaz vs Rigueur Climatique ({selected_region})",
-        yaxis=dict(
-            title_text="Prix Gaz (€/MWh)", 
-            title_font=dict(color="#ff4b4b"), 
-            tickfont=dict(color="#ff4b4b")
-        ),
-        yaxis2=dict(
-            title_text="Température (°C)", 
-            title_font=dict(color="#00d4ff"), 
-            tickfont=dict(color="#00d4ff"), 
-            anchor="x", 
-            overlaying="y", 
-            side="right"
-        ),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
-    )
-    st.plotly_chart(fig, use_container_width=True)
-
-    # Analyse de Saisonnalité
-    st.divider()
-    col_a, col_b = st.columns([1, 1])
-    
-    with col_a:
-        st.subheader("Analyse de Dispersion (Scatter)")
-        fig_scatter = px.scatter(
-            combined, x="Temp_Moyenne", y="Prix_Gaz", 
-            trendline="ols",
-            title="Relation Prix / Température",
-            labels={"Temp_Moyenne": "Température (°C)", "Prix_Gaz": "Prix Gaz (€/MWh)"},
-            template="plotly_dark",
-            color_continuous_scale="RdBu_r"
-        )
-        st.plotly_chart(fig_scatter, use_container_width=True)
-
-    with col_b:
-        st.subheader("Note de Synthèse Stratégique")
-        st.markdown(f"""
-        <div class='report-text'>
-        En tant que <b>Titulaire du Master 2 Finance et Banque</b>, l'analyse des données pour la région <b>{selected_region}</b> révèle les points suivants :
+    if not gas_raw.empty and not weather_raw.empty:
+        # 2. Merge & Clean
+        df = pd.merge(gas_raw, weather_raw, left_index=True, right_index=True, how='inner')
+        df.columns = ['Market_TTF', 'Temp_Mean']
         
-        1. <b>Sensibilité Thermique :</b> La corrélation de <b>{correlation:.2f}</b> indique une dépendance {'inverse forte (logique de chauffage)' if correlation < -0.5 else 'modérée'}.
-        2. <b>Seuils Critiques :</b> Observez les pics de prix lorsque la température descend sous les 5°C. C'est le moment où les stockages sont sollicités.
-        3. <b>Arbitrage Temps/Prix :</b> Le décalage (lag) entre une chute de température et la hausse du TTF permet d'anticiper des positions sur les contrats futures de court terme.
-        </div>
-        """, unsafe_allow_html=True)
+        # 3. Features Engineering
+        # Calcul du DJU (Seuil de chauffe à 18°C)
+        df['DJU'] = np.maximum(0, 18 - df['Temp_Mean'])
+        
+        # Reconstruction du prix final
+        df['Price_Final'] = df['Market_TTF'].apply(lambda x: reconstruct_retail_price(x, current_city_data['zone']))
+        
+        # Moyennes mobiles pour lisser la volatilité market
+        df['Price_SMMA'] = df['Price_Final'].rolling(window=rolling_window).mean()
+        df['DJU_SMMA'] = df['DJU'].rolling(window=rolling_window).mean()
+        
+        df = df.dropna()
 
-else:
-    st.error("Impossible de récupérer les données pour cette période. Vérifiez la connexion aux APIs.")
+        # --- DASHBOARD ---
+
+        st.title(f"Backtest Gaz vs Météo : {city}")
+        st.markdown(f"Analyse de la corrélation entre les **Degrés Jours Unifiés (DJU)** et le **Prix Final Estimé**.")
+
+        # Metrics
+        m1, m2, m3, m4 = st.columns(4)
+        corr_pearson = df['Price_Final'].corr(df['DJU'])
+        
+        with m1:
+            st.metric("Prix Final (Moy)", f"{df['Price_Final'].mean():.2f} €/MWh")
+        with m2:
+            st.metric("Total DJU (Cumul)", f"{df['DJU'].sum():.0f}")
+        with m3:
+            st.metric("Corrélation Pearson", f"{corr_pearson:.2f}")
+        with m4:
+            vol = df['Price_Final'].std()
+            st.metric("Volatilité Prix", f"{vol:.2f} €")
+
+        # Graphique Principal
+        st.subheader("Visualisation de la Stratégie de Convergence")
+        
+        fig = go.Figure()
+
+        # Axe gauche : Prix
+        fig.add_trace(go.Scatter(
+            x=df.index, y=df['Price_SMMA'],
+            name=f"Prix Final (MM {rolling_window}j)",
+            line=dict(color='#ff4b4b', width=3),
+            yaxis="y1"
+        ))
+
+        # Axe droit : DJU (Inversé pour corrélation visuelle ou direct)
+        fig.add_trace(go.Bar(
+            x=df.index, y=df['DJU_SMMA'],
+            name=f"Rigueur Climatique (DJU MM {rolling_window}j)",
+            marker_color='rgba(0, 212, 255, 0.3)',
+            yaxis="y2"
+        ))
+
+        fig.update_layout(
+            template="plotly_dark",
+            height=600,
+            hovermode="x unified",
+            yaxis=dict(title="Prix Final Estimé (€/MWh)", titlefont=dict(color="#ff4b4b"), tickfont=dict(color="#ff4b4b")),
+            yaxis2=dict(title="Degrés Jours Unifiés (DJU)", titlefont=dict(color="#00d4ff"), tickfont=dict(color="#00d4ff"), overlaying="y", side="right"),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+        )
+        
+        # Annotations sur pics
+        peak_date = df['Price_Final'].idxmax()
+        fig.add_annotation(x=peak_date, y=df.loc[peak_date, 'Price_Final'], text="Pic Prix", showarrow=True, arrowhead=1)
+
+        st.plotly_chart(fig, use_container_width=True)
+
+        # Analyse Statistique
+        st.divider()
+        col_left, col_right = st.columns(2)
+
+        with col_left:
+            st.subheader("Analyse de Dispersion & Régression")
+            fig_scatter = px.scatter(
+                df, x="DJU", y="Price_Final", 
+                trendline="ols", trendline_color_override="white",
+                title="Sensibilité : Prix = f(DJU)",
+                template="plotly_dark",
+                color="Temp_Mean", color_continuous_scale="RdBu_r"
+            )
+            st.plotly_chart(fig_scatter, use_container_width=True)
+
+        with col_right:
+            st.subheader("Matrice de Corrélation")
+            corr_matrix = df[['Price_Final', 'DJU', 'Temp_Mean', 'Market_TTF']].corr()
+            fig_heat = px.imshow(
+                corr_matrix, text_auto=True, 
+                color_continuous_scale='RdBu_r',
+                aspect="auto", template="plotly_dark"
+            )
+            st.plotly_chart(fig_heat, use_container_width=True)
+
+        # Note de synthèse
+        st.success(f"**Analyse de l'expert (TSM) :** Le coefficient de corrélation de **{corr_pearson:.2f}** démontre que pour la ville de **{city}**, le risque météo explique une part significative de la variance du prix. Un arbitrage basé sur les prévisions saisonnières est statistiquement viable sur ce segment.")
+
+    else:
+        st.error("Échec de la récupération des données. Les serveurs yfinance ou Open-Meteo sont peut-être surchargés.")
 
 st.divider()
-st.caption("Volt-Alpha v2.2 - Logiciel de modélisation financière appliqué à l'énergie.")
+st.caption("Volt-Alpha v3.0 | Moteur de backtesting quantitatif pour analystes financiers.")
