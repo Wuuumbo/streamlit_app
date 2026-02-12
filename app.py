@@ -140,12 +140,24 @@ if not gas_data.empty and not weather_data.empty:
         yaxis="y2"
     ))
 
+    # Correction des dictionnaires de layout pour éviter le ValueError
     fig.update_layout(
         template="plotly_dark",
         height=600,
-        title=f"Evolution temporelle : Prix du Gaz vs Rigueur Climatique ({selected_region})",
-        yaxis=dict(title="Prix Gaz (€/MWh)", titlefont=dict(color="#ff4b4b"), tickfont=dict(color="#ff4b4b")),
-        yaxis2=dict(title="Température (°C)", titlefont=dict(color="#00d4ff"), tickfont=dict(color="#00d4ff"), anchor="x", overlaying="y", side="right"),
+        title_text=f"Evolution temporelle : Prix du Gaz vs Rigueur Climatique ({selected_region})",
+        yaxis=dict(
+            title_text="Prix Gaz (€/MWh)", 
+            title_font=dict(color="#ff4b4b"), 
+            tickfont=dict(color="#ff4b4b")
+        ),
+        yaxis2=dict(
+            title_text="Température (°C)", 
+            title_font=dict(color="#00d4ff"), 
+            tickfont=dict(color="#00d4ff"), 
+            anchor="x", 
+            overlaying="y", 
+            side="right"
+        ),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
     )
     st.plotly_chart(fig, use_container_width=True)
