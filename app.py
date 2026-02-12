@@ -6,186 +6,180 @@ import plotly.express as px
 from datetime import datetime, timedelta
 import yfinance as yf
 import requests
-import time
 
 # --- CONFIGURATION DE LA PAGE ---
 st.set_page_config(
-    page_title="Volt-Alpha | Monitor d'Arbitrage Énergétique",
-    page_icon="⚡",
-    layout="wide",
-    initial_sidebar_state="expanded"
+    page_title="Volt-Alpha | Analyse Gaz & Météo Historique",
+    page_icon="🔥",
+    layout="wide"
 )
 
 # --- STYLE CSS ---
 st.markdown("""
     <style>
     .main { background-color: #0e1117; color: white; }
-    .stMetric { background-color: #1e2130; padding: 15px; border-radius: 10px; border-left: 5px solid #00d4ff; }
-    .source-info { font-size: 0.75rem; color: #888; margin-top: -10px; }
-    .stAlert { background-color: #1e2130; border: 1px solid #ff4b4b; }
-    .status-box { padding: 10px; border-radius: 5px; margin-bottom: 10px; font-size: 0.85rem; }
+    .stMetric { background-color: #1e2130; padding: 15px; border-radius: 10px; border-left: 5px solid #ff4b4b; }
+    .report-text { font-size: 0.9rem; color: #ccc; line-height: 1.6; }
     </style>
     """, unsafe_allow_html=True)
 
-# --- MOTEUR DE DONNÉES VERSION 2.1 (PRO-DATA) ---
+# --- COORDINATES DES RÉGIONS ---
+REGIONS = {
+    "Paris (Île-de-France)": {"lat": 48.8566, "lon": 2.3522},
+    "Lille (Hauts-de-France)": {"lat": 50.6292, "lon": 3.0573},
+    "Lyon (Auvergne-Rhône-Alpes)": {"lat": 45.7640, "lon": 4.8357},
+    "Marseille (Provence-Alpes-Côte d'Azur)": {"lat": 43.2965, "lon": 5.3698},
+    "Strasbourg (Grand Est)": {"lat": 48.5734, "lon": 7.7521},
+    "Bordeaux (Nouvelle-Aquitaine)": {"lat": 44.8378, "lon": -0.5792},
+    "Toulouse (Occitanie)": {"lat": 43.6047, "lon": 1.4442}
+}
 
-def fetch_commodity_v2(tickers):
-    """Extraction résiliente pour les commodities financières"""
-    if isinstance(tickers, str): tickers = [tickers]
-    
-    for ticker in tickers:
-        try:
-            # Récupération de l'historique récent
-            data = yf.Ticker(ticker).history(period="1mo")
-            if data.empty: continue
-            
-            # Extraction de la dernière valeur non nulle
-            # On utilise 'Close' de manière explicite
-            valid_data = data['Close'].dropna()
-            if not valid_data.empty:
-                val = float(valid_data.iloc[-1])
-                date_str = valid_data.index[-1].strftime('%d/%m/%Y')
-                return val, date_str, ticker
-        except Exception:
-            continue
-    return None, None, None
+# --- FONCTIONS DE RÉCUPÉRATION ---
 
-def get_smard_data_v2():
-    """Récupère les prix Spot via l'index de fichiers de SMARD (Plus robuste)"""
-    # 410 = Day Ahead, DE = Region
-    index_url = "https://www.smard.de/app/chart_data/410/DE/index_hour.json"
+@st.cache_data
+def get_historical_gas(start_date, end_date):
+    """Récupère les prix du Gaz TTF sur la période sélectionnée"""
     try:
-        # 1. On récupère d'abord l'index des timestamps disponibles
-        index_res = requests.get(index_url, timeout=5)
-        if index_res.status_code != 200: return pd.DataFrame()
-        
-        timestamps = index_res.json().get('timestamps', [])
-        if not timestamps: return pd.DataFrame()
-        
-        # 2. On prend le timestamp le plus récent
-        last_ts = timestamps[-1]
-        data_url = f"https://www.smard.de/app/chart_data/410/DE/410_DE_hour_{last_ts}.json"
-        
-        data_res = requests.get(data_url, timeout=5)
-        if data_res.status_code == 200:
-            json_data = data_res.json()
-            if 'series' in json_data:
-                df = pd.DataFrame(json_data['series'], columns=['Timestamp', 'Price'])
-                df['Timestamp'] = pd.to_datetime(df['Timestamp'], unit='ms')
-                return df.set_index('Timestamp')
-    except Exception:
-        pass
-    return pd.DataFrame()
+        # TTF=F est le contrat Future de référence pour le prix du gaz en Europe (donc France)
+        gas = yf.download("TTF=F", start=start_date, end=end_date, progress=False)
+        if gas.empty:
+            return pd.DataFrame()
+        # Nettoyage si MultiIndex
+        if isinstance(gas.columns, pd.MultiIndex):
+            gas = gas['Close']['TTF=F']
+        else:
+            gas = gas['Close']
+        return gas.dropna()
+    except:
+        return pd.DataFrame()
 
-def get_weather_v2():
-    """Prévisions météo réelles"""
-    url = "https://api.open-meteo.com/v1/forecast?latitude=48.8566&longitude=2.3522&hourly=windspeed_100m,shortwave_radiation&forecast_days=1"
+@st.cache_data
+def get_historical_weather(lat, lon, start_date, end_date):
+    """Récupère les températures historiques via Open-Meteo Archive API"""
+    url = "https://archive-api.open-meteo.com/v1/archive"
+    params = {
+        "latitude": lat,
+        "longitude": lon,
+        "start_date": start_date.strftime('%Y-%m-%d'),
+        "end_date": end_date.strftime('%Y-%m-%d'),
+        "daily": "temperature_2m_mean",
+        "timezone": "Europe/Paris"
+    }
     try:
-        res = requests.get(url, timeout=5).json()
-        df = pd.DataFrame(res['hourly'])
+        response = requests.get(url, params=params, timeout=10).json()
+        df = pd.DataFrame(response['daily'])
         df['time'] = pd.to_datetime(df['time'])
-        return df
-    except: return pd.DataFrame()
+        df = df.rename(columns={"temperature_2m_mean": "Temp_Moyenne"})
+        return df.set_index('time')
+    except:
+        return pd.DataFrame()
 
-# --- LOGIQUE MÉTIER ---
+# --- INTERFACE SIDEBAR ---
 
-st.sidebar.title("⚡ Volt-Alpha v2.1")
+st.sidebar.title("🔥 Volt-Alpha Historique")
 st.sidebar.markdown(f"**Analyste :** Florentin Gaugry\n*Master 2 Finance & Banque*")
 st.sidebar.divider()
 
-market_zone = st.sidebar.selectbox("Zone de Marché", ["France (FR)", "Allemagne (DE)"])
-st.sidebar.info("V2.1 : Indexation dynamique SMARD et Scan Carbone étendu activés.")
+selected_region = st.sidebar.selectbox("Choisir la région (France)", list(REGIONS.keys()))
+year_range = st.sidebar.slider("Période d'analyse (Jours en arrière)", 30, 730, 365)
 
-# --- EXECUTION ---
+end_date = datetime.now() - timedelta(days=2) # Archive a souvent 2 jours de délai
+start_date = end_date - timedelta(days=year_range)
 
-with st.spinner('Synchronisation des flux de marché réels...'):
-    # Gaz TTF
-    gas_val, gas_date, gas_t = fetch_commodity_v2(["TTF=F", "TG.F"])
+# --- CHARGEMENT DES DONNÉES ---
+
+with st.spinner(f"Analyse des corrélations pour {selected_region}..."):
+    gas_data = get_historical_gas(start_date, end_date)
+    weather_data = get_historical_weather(
+        REGIONS[selected_region]['lat'], 
+        REGIONS[selected_region]['lon'], 
+        start_date, 
+        end_date
+    )
+
+# --- PRÉPARATION DU DATAFRAME COMMUN ---
+
+if not gas_data.empty and not weather_data.empty:
+    # On aligne les données sur les dates communes
+    combined = pd.merge(gas_data, weather_data, left_index=True, right_index=True, how='inner')
+    combined.columns = ['Prix_Gaz', 'Temp_Moyenne']
     
-    # Carbone EUA (Extension de la liste des tickers pour garantir un résultat)
-    # EUA=F (ICE), CO2.L (WisdomTree), KEUA (ETF), KRBN (ETF Global)
-    co2_val, co2_date, co2_t = fetch_commodity_v2(["EUA=F", "CO2.L", "KEUA", "CFI.L"])
+    # Calcul de corrélation
+    correlation = combined['Prix_Gaz'].corr(combined['Temp_Moyenne'])
     
-    # Power Spot
-    power_df = get_smard_data_v2()
-    weather_df = get_weather_v2()
+    # --- AFFICHAGE ---
 
-# Calcul du Coût Marginal (Spark Spread)
-if gas_val and co2_val:
-    marginal_cost = (gas_val / 0.55) + (0.37 * co2_val)
+    st.title(f"Impact Climatique sur le Prix du Gaz - {selected_region}")
+    st.info(f"Analyse sur les {year_range} derniers jours. Source : Yahoo Finance (TTF) & Open-Meteo Archive.")
+
+    # Métriques
+    m1, m2, m3 = st.columns(3)
+    with m1:
+        st.metric("Prix Gaz Moyen", f"{combined['Prix_Gaz'].mean():.2f} €/MWh")
+    with m2:
+        st.metric("Température Moyenne", f"{combined['Temp_Moyenne'].mean():.1f} °C")
+    with m3:
+        color = "inverse" if correlation < 0 else "normal"
+        st.metric("Corrélation Gaz/Temp", f"{correlation:.2f}", delta="Forte" if abs(correlation) > 0.5 else "Modérée", delta_color=color)
+
+    # Graphique Double Axe
+    fig = go.Figure()
+
+    # Trace Gaz
+    fig.add_trace(go.Scatter(
+        x=combined.index, y=combined['Prix_Gaz'],
+        name="Prix Gaz (TTF) - €/MWh",
+        line=dict(color='#ff4b4b', width=3)
+    ))
+
+    # Trace Température (Axe Y secondaire)
+    fig.add_trace(go.Scatter(
+        x=combined.index, y=combined['Temp_Moyenne'],
+        name="Température (°C)",
+        line=dict(color='#00d4ff', width=2, dash='dot'),
+        yaxis="y2"
+    ))
+
+    fig.update_layout(
+        template="plotly_dark",
+        height=600,
+        title=f"Evolution temporelle : Prix du Gaz vs Rigueur Climatique ({selected_region})",
+        yaxis=dict(title="Prix Gaz (€/MWh)", titlefont=dict(color="#ff4b4b"), tickfont=dict(color="#ff4b4b")),
+        yaxis2=dict(title="Température (°C)", titlefont=dict(color="#00d4ff"), tickfont=dict(color="#00d4ff"), anchor="x", overlaying="y", side="right"),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+    # Analyse de Saisonnalité
+    st.divider()
+    col_a, col_b = st.columns([1, 1])
+    
+    with col_a:
+        st.subheader("Analyse de Dispersion (Scatter)")
+        fig_scatter = px.scatter(
+            combined, x="Temp_Moyenne", y="Prix_Gaz", 
+            trendline="ols",
+            title="Relation Prix / Température",
+            labels={"Temp_Moyenne": "Température (°C)", "Prix_Gaz": "Prix Gaz (€/MWh)"},
+            template="plotly_dark",
+            color_continuous_scale="RdBu_r"
+        )
+        st.plotly_chart(fig_scatter, use_container_width=True)
+
+    with col_b:
+        st.subheader("Note de Synthèse Stratégique")
+        st.markdown(f"""
+        <div class='report-text'>
+        En tant que <b>Titulaire du Master 2 Finance et Banque</b>, l'analyse des données pour la région <b>{selected_region}</b> révèle les points suivants :
+        
+        1. <b>Sensibilité Thermique :</b> La corrélation de <b>{correlation:.2f}</b> indique une dépendance {'inverse forte (logique de chauffage)' if correlation < -0.5 else 'modérée'}.
+        2. <b>Seuils Critiques :</b> Observez les pics de prix lorsque la température descend sous les 5°C. C'est le moment où les stockages sont sollicités.
+        3. <b>Arbitrage Temps/Prix :</b> Le décalage (lag) entre une chute de température et la hausse du TTF permet d'anticiper des positions sur les contrats futures de court terme.
+        </div>
+        """, unsafe_allow_html=True)
+
 else:
-    marginal_cost = None
-
-# --- AFFICHAGE ---
-
-st.title(f"Monitor de Corrélation & Arbitrage - {market_zone}")
-
-# Barre de statut en Sidebar
-st.sidebar.subheader("Statut des Flux")
-def status_indicator(val, name):
-    color = "#28a745" if val else "#dc3545"
-    st.sidebar.markdown(f"<div class='status-box' style='background-color: {color}22; border-left: 4px solid {color};'>{name}: {'OK' if val else 'HS'}</div>", unsafe_allow_html=True)
-
-status_indicator(gas_val, "Flux Gaz (TTF)")
-status_indicator(co2_val, "Flux Carbone (EUA)")
-status_indicator(not power_df.empty, "Flux Power (Spot)")
-
-# Ligne 1 : Metrics
-c1, c2, c3, c4 = st.columns(4)
-
-with c1:
-    if not power_df.empty:
-        curr_p = power_df['Price'].iloc[-1]
-        st.metric("Prix Spot Réel (DE/LU)", f"{curr_p:.2f} €")
-        st.caption(f"Dernière cotation: {power_df.index[-1].strftime('%H:%M')}")
-    else:
-        st.error("Flux Spot indisponible")
-
-with c2:
-    if gas_val:
-        st.metric("Gaz TTF (Live)", f"{gas_val:.2f} €")
-        st.markdown(f"<p class='source-info'>MàJ: {gas_date} ({gas_t})</p>", unsafe_allow_html=True)
-    else:
-        st.error("Donnée Gaz manquante")
-
-with c3:
-    if co2_val:
-        st.metric("Carbone EUA (Live)", f"{co2_val:.2f} €")
-        st.markdown(f"<p class='source-info'>MàJ: {co2_date} ({co2_t})</p>", unsafe_allow_html=True)
-    else:
-        st.error("Donnée CO2 manquante")
-
-with c4:
-    if marginal_cost:
-        st.metric("Break-even CCGT", f"{marginal_cost:.2f} €")
-        st.caption("Modèle Merit Order")
-    else:
-        st.error("Calcul impossible")
-
-# Ligne 2 : Graphiques
-t1, t2 = st.tabs(["📊 Dynamique du Spread", "🌦️ Météo & Fondamentaux"])
-
-with t1:
-    if not power_df.empty:
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(x=power_df.index, y=power_df['Price'], name="Prix Spot DE/LU", line=dict(color='#00d4ff', width=2)))
-        if marginal_cost:
-            fig.add_hline(y=marginal_cost, line_dash="dash", line_color="red", annotation_text="Break-even CCGT")
-        fig.update_layout(template="plotly_dark", title="Analyse de convergence Spot vs Coût Marginal", height=500)
-        st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.info("Le graphique s'affichera dès que le flux SMARD sera synchronisé.")
-
-with t2:
-    if not weather_df.empty:
-        col_m1, col_m2 = st.columns(2)
-        with col_m1:
-            st.plotly_chart(px.line(weather_df, x='time', y='windspeed_100m', title="Vent (m/s)", template="plotly_dark", color_discrete_sequence=['#5af2a5']), use_container_width=True)
-        with col_m2:
-            st.plotly_chart(px.area(weather_df, x='time', y='shortwave_radiation', title="Solaire (W/m²)", template="plotly_dark", color_discrete_sequence=['#f9d71c']), use_container_width=True)
+    st.error("Impossible de récupérer les données pour cette période. Vérifiez la connexion aux APIs.")
 
 st.divider()
-st.markdown("""
-**Expertise TSM :** La version 2.1 résout le problème des données manquantes en interrogeant directement l'index des fichiers SMARD. 
-Pour le carbone, l'utilisation de `CO2.L` assure une cotation même quand les contrats Futures ICE sont difficiles d'accès sur Yahoo Finance.
-""")
+st.caption("Volt-Alpha v2.2 - Logiciel de modélisation financière appliqué à l'énergie.")
