@@ -14,10 +14,18 @@ st.set_page_config(
     layout="wide"
 )
 
+# --- STYLE CSS ---
+st.markdown("""
+    <style>
+    .main { background-color: #0e1117; color: white; }
+    .stMetric { background-color: #1e2130; padding: 15px; border-radius: 10px; border-left: 5px solid #ff4b4b; }
+    .source-link { font-size: 0.8rem; color: #00d4ff; text-decoration: none; }
+    .source-link:hover { text-decoration: underline; }
+    </style>
+    """, unsafe_allow_html=True)
+
 # --- CONSTANTES ET MAPPAGE MÉTIER ---
 
-# Mapping des villes vers Zones GRDF et coordonnées GPS
-# Zone 1 (Moins cher) -> Zone 6 (Plus cher d'acheminement)
 CITY_MAP = {
     "Paris (Île-de-France)": {"lat": 48.8566, "lon": 2.3522, "zone": 2},
     "Toulouse (Occitanie)": {"lat": 43.6047, "lon": 1.4442, "zone": 1},
@@ -27,10 +35,9 @@ CITY_MAP = {
     "Biarritz (Nouvelle-Aquitaine)": {"lat": 43.4832, "lon": -1.5586, "zone": 1}
 }
 
-# Paramètres fiscaux et transport (Estimations moyennes 2024/2025)
-TICGN = 16.37  # €/MWh (Taxe Intérieure de Consommation sur le Gaz Naturel)
-ACHEMINEMENT_FIXE = 25.0  # €/MWh (Estimation transport + distribution hors zone)
-VAT_COMMODITY = 1.20  # TVA 20% sur la molécule et taxes
+TICGN = 16.37  
+ACHEMINEMENT_FIXE = 25.0  
+VAT_COMMODITY = 1.20  
 
 # --- FONCTIONS DE RÉCUPÉRATION DE DONNÉES ---
 
@@ -42,14 +49,11 @@ def get_market_data(ticker, days):
     try:
         data = yf.download(ticker, start=start, end=end, progress=False)
         if data.empty: return pd.DataFrame()
-        
-        # Aplatissement si MultiIndex
         if isinstance(data.columns, pd.MultiIndex):
             df = data['Close'][[ticker]].copy()
             df.columns = ['Close']
         else:
             df = data[['Close']].copy()
-            
         return df.dropna()
     except Exception:
         return pd.DataFrame()
@@ -59,7 +63,6 @@ def get_weather_archive(lat, lon, days):
     """Récupère les températures historiques via Open-Meteo Archive"""
     end_date = (datetime.now() - timedelta(days=3)).strftime('%Y-%m-%d')
     start_date = (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d')
-    
     url = "https://archive-api.open-meteo.com/v1/archive"
     params = {
         "latitude": lat,
@@ -81,23 +84,24 @@ def get_weather_archive(lat, lon, days):
 # --- LOGIQUE DE CALCUL QUANTITATIF ---
 
 def reconstruct_retail_price(wholesale_price, zone):
-    """
-    Transforme le prix de gros (TTF) en prix final estimé (€/MWh)
-    Logique : Prix Gros + Spread Zone + Taxes + TVA
-    """
-    # Le spread de zone est d'environ 1€/MWh par niveau de zone au-delà de 1
+    """Transforme le prix de gros (TTF) en prix final estimé (€/MWh)"""
     zone_spread = (zone - 1) * 1.50 
-    
-    # Prix HT = Gros + Transport + Spread
     price_ht = wholesale_price + ACHEMINEMENT_FIXE + zone_spread + TICGN
-    
-    # Prix TTC (simplifié sur la part variable)
     return price_ht * VAT_COMMODITY
 
 # --- INTERFACE STREAMLIT ---
 
 st.sidebar.title("📉 Volt-Alpha Quant")
 st.sidebar.markdown(f"**Analyste :** Florentin Gaugry\n*Master 2 Finance & Banque*")
+st.sidebar.divider()
+
+# Sources de Données (Liens demandés)
+st.sidebar.subheader("🔌 Sources des Données")
+st.sidebar.markdown("""
+- [📊 Marché Gaz (TTF Futures)](https://finance.yahoo.com/quote/TTF=F/)
+- [🌡️ Météo (Open-Meteo Archive)](https://open-meteo.com/en/docs/historical-weather-api)
+- [🏢 Zonage & Tarif (GRDF)](https://www.grdf.fr/fournisseurs/gaz-naturel/tarif-gaz-naturel)
+""", unsafe_allow_html=True)
 st.sidebar.divider()
 
 # Configuration du Backtest
@@ -107,35 +111,22 @@ rolling_window = st.sidebar.slider("Moyenne Mobile (jours)", 1, 60, 30)
 period = st.sidebar.radio("Historique", ["1 an", "2 ans"], index=1)
 lookback = 730 if period == "2 ans" else 365
 
-# Paramètres de simulation
-st.sidebar.divider()
-st.sidebar.subheader("Hypothèses de Zone")
 current_city_data = CITY_MAP[city]
 st.sidebar.info(f"📍 Zone GRDF détectée : **Zone {current_city_data['zone']}**")
 
 # --- TRAITEMENT DES DONNÉES ---
 
 with st.spinner("Analyse quantitative en cours..."):
-    # 1. Fetch
-    gas_raw = get_market_data("TTF=F", lookback + 30) # +30 pour la MM
+    gas_raw = get_market_data("TTF=F", lookback + 30)
     weather_raw = get_weather_archive(current_city_data['lat'], current_city_data['lon'], lookback + 30)
     
     if not gas_raw.empty and not weather_raw.empty:
-        # 2. Merge & Clean
         df = pd.merge(gas_raw, weather_raw, left_index=True, right_index=True, how='inner')
         df.columns = ['Market_TTF', 'Temp_Mean']
-        
-        # 3. Features Engineering
-        # Calcul du DJU (Seuil de chauffe à 18°C)
         df['DJU'] = np.maximum(0, 18 - df['Temp_Mean'])
-        
-        # Reconstruction du prix final
         df['Price_Final'] = df['Market_TTF'].apply(lambda x: reconstruct_retail_price(x, current_city_data['zone']))
-        
-        # Moyennes mobiles pour lisser la volatilité market
         df['Price_SMMA'] = df['Price_Final'].rolling(window=rolling_window).mean()
         df['DJU_SMMA'] = df['DJU'].rolling(window=rolling_window).mean()
-        
         df = df.dropna()
 
         # --- DASHBOARD ---
@@ -161,16 +152,12 @@ with st.spinner("Analyse quantitative en cours..."):
         st.subheader("Visualisation de la Stratégie de Convergence")
         
         fig = go.Figure()
-
-        # Axe gauche : Prix
         fig.add_trace(go.Scatter(
             x=df.index, y=df['Price_SMMA'],
             name=f"Prix Final (MM {rolling_window}j)",
             line=dict(color='#ff4b4b', width=3),
             yaxis="y1"
         ))
-
-        # Axe droit : DJU (Inversé pour corrélation visuelle ou direct)
         fig.add_trace(go.Bar(
             x=df.index, y=df['DJU_SMMA'],
             name=f"Rigueur Climatique (DJU MM {rolling_window}j)",
@@ -182,22 +169,11 @@ with st.spinner("Analyse quantitative en cours..."):
             template="plotly_dark",
             height=600,
             hovermode="x unified",
-            yaxis=dict(
-                title_text="Prix Final Estimé (€/MWh)", 
-                title_font=dict(color="#ff4b4b"), 
-                tickfont=dict(color="#ff4b4b")
-            ),
-            yaxis2=dict(
-                title_text="Degrés Jours Unifiés (DJU)", 
-                title_font=dict(color="#00d4ff"), 
-                tickfont=dict(color="#00d4ff"), 
-                overlaying="y", 
-                side="right"
-            ),
+            yaxis=dict(title_text="Prix Final Estimé (€/MWh)", title_font=dict(color="#ff4b4b"), tickfont=dict(color="#ff4b4b")),
+            yaxis2=dict(title_text="Degrés Jours Unifiés (DJU)", title_font=dict(color="#00d4ff"), tickfont=dict(color="#00d4ff"), overlaying="y", side="right"),
             legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
         )
         
-        # Annotations sur pics
         peak_date = df['Price_Final'].idxmax()
         fig.add_annotation(x=peak_date, y=df.loc[peak_date, 'Price_Final'], text="Pic Prix", showarrow=True, arrowhead=1)
 
@@ -228,11 +204,10 @@ with st.spinner("Analyse quantitative en cours..."):
             )
             st.plotly_chart(fig_heat, use_container_width=True)
 
-        # Note de synthèse
-        st.success(f"**Analyse de l'expert (TSM) :** Le coefficient de corrélation de **{corr_pearson:.2f}** démontre que pour la ville de **{city}**, le risque météo explique une part significative de la variance du prix. Un arbitrage basé sur les prévisions saisonnières est statistiquement viable sur ce segment.")
+        st.success(f"**Analyse de l'expert (TSM) :** Le coefficient de corrélation de **{corr_pearson:.2f}** démontre l'élasticité de la demande. Sources auditées via [Yahoo](https://finance.yahoo.com) et [Open-Meteo](https://open-meteo.com).")
 
     else:
-        st.error("Échec de la récupération des données. Les serveurs yfinance ou Open-Meteo sont peut-être surchargés.")
+        st.error("Échec de la récupération des données. Vérifiez les sources en barre latérale.")
 
 st.divider()
-st.caption("Volt-Alpha v3.1 | Moteur de backtesting quantitatif corrigé pour analystes financiers.")
+st.caption("Volt-Alpha v3.2 | Sources de données transparentes et auditables.")
