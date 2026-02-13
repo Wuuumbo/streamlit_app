@@ -43,8 +43,14 @@ def get_market_data():
     # Gaz TTF (Driver du coût marginal)
     try:
         gas = yf.download("TTF=F", period="1mo", interval="1d", progress=False)
-        data_dict['Gas'] = gas['Close'].dropna().iloc[-1] if not gas.empty else 35.0
-    except: data_dict['Gas'] = 35.0
+        if not gas.empty:
+            # Sécurisation du formatage : on extrait la valeur scalaire
+            val = gas['Close'].dropna().iloc[-1]
+            data_dict['Gas'] = float(val)
+        else:
+            data_dict['Gas'] = 35.0
+    except: 
+        data_dict['Gas'] = 35.0
 
     # Elec Spot France (SMARD API)
     index_url = "https://www.smard.de/app/chart_data/410/FR/index_hour.json"
@@ -56,7 +62,7 @@ def get_market_data():
         df = pd.DataFrame(res['series'], columns=['Timestamp', 'Elec_Price'])
         df['Timestamp'] = pd.to_datetime(df['Timestamp'], unit='ms')
         data_dict['Elec_DF'] = df.set_index('Timestamp')
-        data_dict['Elec_Last'] = df['Elec_Price'].iloc[-1]
+        data_dict['Elec_Last'] = float(df['Elec_Price'].iloc[-1])
     except:
         data_dict['Elec_DF'] = pd.DataFrame()
         data_dict['Elec_Last'] = 60.0
@@ -95,18 +101,13 @@ with st.spinner("Analyse des flux physiques en cours..."):
 
     if not weather.empty:
         # 1. Calcul de l'Indicateur de Tension (Stress Index)
-        # Demande (Tension thermique) : Plus il fait froid, plus la tension monte
         temp_last = weather['temperature_2m'].iloc[0]
-        stress_thermal = max(0, (18 - temp_last) / 20) # Normalisé entre 0 et 1
+        stress_thermal = max(0, (18 - temp_last) / 20) 
         
-        # Offre EnR (Pression de production) : Plus il y a de vent/soleil, plus la tension baisse
         wind_last = weather['windspeed_100m'].iloc[0]
         solar_last = weather['shortwave_radiation'].iloc[0]
         
-        # Potentiel EnR combiné (Normalisé)
         enr_potential = (min(wind_last, 60) / 60) * 0.7 + (min(solar_last, 800) / 800) * 0.3
-        
-        # Score final : Demande - Offre EnR
         scarcity_score = stress_thermal - enr_potential
         
         # --- DASHBOARD ---
@@ -125,7 +126,9 @@ with st.spinner("Analyse des flux physiques en cours..."):
         with c1:
             st.metric("Prix Élec Spot", f"{market['Elec_Last']:.2f} €/MWh")
         with c2:
-            st.metric("Prix Gaz (Driver)", f"{market['Gas']:.2f} €")
+            # Sécurisation de l'affichage du prix Gaz
+            gas_price = market.get('Gas', 35.0)
+            st.metric("Prix Gaz (Driver)", f"{gas_price:.2f} €")
         with c3:
             st.metric("Vitesse Vent (100m)", f"{wind_last:.1f} km/h")
         with c4:
@@ -136,7 +139,6 @@ with st.spinner("Analyse des flux physiques en cours..."):
 
         with t1:
             fig = go.Figure()
-            # On affiche le vent et le rayonnement sur la zone choisie
             fig.add_trace(go.Scatter(x=weather.index, y=weather['windspeed_100m'], name="Vent (km/h)", line=dict(color='#00d4ff')))
             fig.add_trace(go.Scatter(x=weather.index, y=weather['shortwave_radiation'], name="Solaire (W/m²)", line=dict(color='#f9d71c'), yaxis="y2"))
             
@@ -150,18 +152,15 @@ with st.spinner("Analyse des flux physiques en cours..."):
 
         with t2:
             if not market['Elec_DF'].empty:
-                # Corrélation visuelle entre prix réel et température
                 fig_corr = go.Figure()
                 fig_corr.add_trace(go.Scatter(x=market['Elec_DF'].index, y=market['Elec_DF']['Elec_Price'], name="Prix Spot FR", line=dict(color='#ffaa00')))
-                
-                # On récupère l'historique de température pour la même période (simplifié)
                 fig_corr.update_layout(template="plotly_dark", title="Dynamique des Prix Spot France (24-48h)", height=500)
                 st.plotly_chart(fig_corr, use_container_width=True)
 
         st.divider()
-        st.subheader("📝 Note de l'Analyste (TSM)")
+        st.subheader("📝 Note de l'Analyste")
         st.markdown(f"""
-        En analysant la zone **{selected_zone}**, nous observons que le driver principal de rentabilité est actuellement **{ 'le vent' if wind_last > 30 else 'la température' if temp_last < 10 else 'le gaz' }**. 
+        En tant que **Titulaire du Master 2 Finance et Banque de la Toulouse School of Management**, j'observe que le driver principal de rentabilité pour **{selected_zone}** est actuellement **{ 'le vent' if wind_last > 30 else 'la température' if temp_last < 10 else 'le gaz' }**. 
         Pour un arbitrage lucratif, surveillez l'écart entre le prix Spot et le coût marginal du gaz quand l'Indice de Rareté dépasse 0.4.
         """)
 
