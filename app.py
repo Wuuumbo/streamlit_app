@@ -5,6 +5,8 @@ import plotly.express as px
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
 import requests
+# Import nécessaire pour les dégradés de couleurs dans les dataframes Pandas
+import matplotlib.pyplot as plt 
 
 # Configuration de la page
 st.set_page_config(page_title="Corrélation Énergie & Météo France", layout="wide")
@@ -150,7 +152,13 @@ if len(date_range) == 2:
                 st.subheader("🧪 Analyse Statistique")
                 st.write("Matrice de corrélation (Pearson) :")
                 corr_matrix = full_df[["temp_mean", "Electricity_Price", "Gas_Price"]].corr()
-                st.dataframe(corr_matrix.style.background_gradient(cmap='coolwarm', axis=None), use_container_width=True)
+                
+                # Gestion de l'affichage avec sécurité pour matplotlib
+                try:
+                    st.dataframe(corr_matrix.style.background_gradient(cmap='coolwarm', axis=None), use_container_width=True)
+                except ImportError:
+                    st.dataframe(corr_matrix, use_container_width=True)
+                    st.warning("Note : Installez 'matplotlib' pour voir le dégradé de couleurs dans le tableau.")
                 
                 st.info("""
                 **Interprétation :** En France, le mix électrique est très sensible au chauffage électrique. 
