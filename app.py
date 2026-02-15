@@ -5,8 +5,13 @@ import plotly.express as px
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
 import requests
-# Nécessaire pour les dégradés Pandas (background_gradient)
-import matplotlib.pyplot as plt 
+
+# Tentative d'import de matplotlib pour le stylage, sans bloquer l'app si absent
+try:
+    import matplotlib.pyplot as plt
+    HAS_MATPLOTLIB = True
+except ImportError:
+    HAS_MATPLOTLIB = False
 
 # Configuration de la page
 st.set_page_config(page_title="Energy & Weather Analytics", layout="wide", initial_sidebar_state="expanded")
@@ -149,7 +154,6 @@ if len(date_range) == 2:
             
             with col_left:
                 st.subheader("📉 Analyse de Régression (Sensibilité)")
-                fig_reg = px.get_trendline_results(px.scatter(df, x="temp_mean", y="Electricity_Price", trendline="ols"))
                 
                 fig_scatter = px.scatter(
                     df, x="temp_mean", y="Electricity_Price", 
@@ -164,10 +168,16 @@ if len(date_range) == 2:
             with col_right:
                 st.subheader("📋 Matrice Risque")
                 corr_matrix = df[["temp_mean", "Electricity_Price", "Gas_Price"]].corr()
-                try:
-                    st.dataframe(corr_matrix.style.background_gradient(cmap='RdYlGn_r', axis=None).format("{:.2f}"), use_container_width=True)
-                except:
+                
+                # Gestion sécurisée de l'affichage sans matplotlib
+                if HAS_MATPLOTLIB:
+                    try:
+                        st.dataframe(corr_matrix.style.background_gradient(cmap='RdYlGn_r', axis=None).format("{:.2f}"), use_container_width=True)
+                    except:
+                        st.dataframe(corr_matrix.round(2), use_container_width=True)
+                else:
                     st.dataframe(corr_matrix.round(2), use_container_width=True)
+                    st.info("💡 Tip: Installez 'matplotlib' pour activer le code couleur dans ce tableau.")
                 
                 st.markdown(f"""
                 **Note d'analyse :**
@@ -178,7 +188,7 @@ if len(date_range) == 2:
 
             with st.expander("📂 Exportation des données brutes (Audit)"):
                 st.download_button("Télécharger CSV", df.to_csv(index=False), "energy_data_audit.csv", "text/csv")
-                st.dataframe(df.style.highlight_max(axis=0, color='#ffebcc'))
+                st.dataframe(df.style.highlight_max(axis=0, color='#ffebcc') if HAS_MATPLOTLIB else df)
                 
         else:
             st.error("Données indisponibles.")
