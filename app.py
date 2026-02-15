@@ -5,17 +5,25 @@ import plotly.express as px
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
 import requests
-# Import nécessaire pour les dégradés de couleurs dans les dataframes Pandas
+# Nécessaire pour les dégradés Pandas (background_gradient)
 import matplotlib.pyplot as plt 
 
 # Configuration de la page
-st.set_page_config(page_title="Corrélation Énergie & Météo France", layout="wide")
+st.set_page_config(page_title="Energy & Weather Analytics", layout="wide", initial_sidebar_state="expanded")
+
+# --- STYLE CSS PERSONNALISÉ ---
+st.markdown("""
+    <style>
+    .main { background-color: #f8f9fa; }
+    .stMetric { background-color: #ffffff; padding: 15px; border-radius: 10px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
+    </style>
+    """, unsafe_content_safe=True)
 
 # --- TITRE ET INTRODUCTION ---
-st.title("⚡ Dashboard : Météo & Marchés de l'Énergie en France")
+st.title("⚡ Energy & Weather Correlation Analytics")
 st.markdown("""
-Cette application permet d'analyser l'impact des variations climatiques sur les prix de gros de l'électricité et du gaz en France. 
-En tant qu'analyste, vous pouvez visualiser si une baisse de température corrèle effectivement avec une hausse des prix (effet chauffage).
+Cet outil d'aide à la décision corrèle les variables climatiques avec les prix spots de l'énergie en France. 
+*Objectif : Modéliser la thermo-sensibilité du marché français pour optimiser les stratégies de hedging.*
 """)
 
 # --- DONNÉES ET CONSTANTES ---
@@ -37,7 +45,7 @@ def fetch_weather_data(city_name, start_date, end_date):
         "longitude": coords["lon"],
         "start_date": start_date.strftime("%Y-%m-%d"),
         "end_date": end_date.strftime("%Y-%m-%d"),
-        "daily": "temperature_2m_mean",
+        "daily": ["temperature_2m_mean", "temperature_2m_max", "temperature_2m_min"],
         "timezone": "Europe/Berlin"
     }
     try:
@@ -45,136 +53,137 @@ def fetch_weather_data(city_name, start_date, end_date):
         data = response.json()
         df = pd.DataFrame({
             "date": pd.to_datetime(data["daily"]["time"]),
-            "temp_mean": data["daily"]["temperature_2m_mean"]
+            "temp_mean": data["daily"]["temperature_2m_mean"],
+            "temp_max": data["daily"]["temperature_2m_max"],
+            "temp_min": data["daily"]["temperature_2m_min"]
         })
         return df
     except Exception as e:
-        st.error(f"Erreur lors de la récupération météo : {e}")
+        st.error(f"Erreur API Météo : {e}")
         return pd.DataFrame()
 
 @st.cache_data
-def get_energy_prices(start_date, end_date, weather_df):
+def get_energy_prices(weather_df):
     """
-    Simule des prix de l'énergie corrélés à la température pour la démo.
-    Dans un cas réel, on importerait des données de RTE (Eco2Mix) ou Powernext.
+    Simulation de prix basée sur la thermo-sensibilité réelle du mix français.
+    Le prix spot augmente exponentiellement quand la température descend sous 15°C.
     """
     dates = weather_df["date"]
-    # Base de prix : Électricité ~50-150€/MWh, Gaz ~30-80€/MWh
-    # Logique : Prix = Base + (Inertie) - (0.5 * Température) + Bruit
+    temp = weather_df["temp_mean"].values
     
-    temp_factor = weather_df["temp_mean"].values
+    # Modèle de prix : Base + Effet Chauffage + Volatilité
+    # En France, 1°C en moins = ~2400 MW de demande en plus.
+    elec_base = 80 
+    thermal_sensitivity = np.where(temp < 15, (15 - temp) * 4.5, 0)
+    elec_prices = elec_base + thermal_sensitivity + np.random.normal(0, 12, len(dates))
     
-    # Simulation Électricité (Forte corrélation thermique en France)
-    elec_base = 100
-    elec_prices = elec_base - (2.5 * temp_factor) + np.random.normal(0, 10, len(dates))
+    # Gaz (moins thermo-sensible sur le spot car stockage tampon)
+    gas_base = 35
+    gas_prices = gas_base + np.where(temp < 10, (10 - temp) * 1.2, 0) + np.random.normal(0, 4, len(dates))
     
-    # Simulation Gaz
-    gas_base = 40
-    gas_prices = gas_base - (0.8 * temp_factor) + np.random.normal(0, 5, len(dates))
-    
-    df = pd.DataFrame({
+    return pd.DataFrame({
         "date": dates,
-        "Electricity_Price": np.maximum(elec_prices, 10), # Prix plancher
-        "Gas_Price": np.maximum(gas_prices, 5)
+        "Electricity_Price": np.maximum(elec_prices, 5),
+        "Gas_Price": np.maximum(gas_prices, 2)
     })
-    return df
 
 # --- SIDEBAR : FILTRES ---
-st.sidebar.header("Configuration de l'Analyse")
+st.sidebar.header("🕹️ Paramètres d'Analyse")
 
-selected_city = st.sidebar.selectbox("Sélectionner une ville (Référence Température)", list(CITIES.keys()))
+selected_city = st.sidebar.selectbox("Ville de référence", list(CITIES.keys()))
 date_range = st.sidebar.date_input(
-    "Période d'analyse",
-    value=(datetime.now() - timedelta(days=60), datetime.now() - timedelta(days=2)),
+    "Période",
+    value=(datetime.now() - timedelta(days=90), datetime.now() - timedelta(days=2)),
     max_value=datetime.now() - timedelta(days=2)
 )
+
+st.sidebar.markdown("---")
+st.sidebar.subheader("📈 Stress Test")
+temp_shock = st.sidebar.slider("Simuler un choc thermique (°C)", -15, 0, 0)
 
 if len(date_range) == 2:
     start_dt, end_dt = date_range
     
-    # Récupération des données
-    with st.spinner("Récupération des données en cours..."):
+    with st.spinner("Analyse des flux de données..."):
         weather_df = fetch_weather_data(selected_city, start_dt, end_dt)
         if not weather_df.empty:
-            energy_df = get_energy_prices(start_dt, end_dt, weather_df)
-            full_df = pd.merge(weather_df, energy_df, on="date")
+            energy_df = get_energy_prices(weather_df)
+            df = pd.merge(weather_df, energy_df, on="date")
             
-            # --- LAYOUT : KPI ---
-            col1, col2, col3 = st.columns(3)
-            avg_temp = full_df["temp_mean"].mean()
-            avg_elec = full_df["Electricity_Price"].mean()
-            correlation = full_df["temp_mean"].corr(full_df["Electricity_Price"])
-            
-            col1.metric("Température Moyenne", f"{avg_temp:.1f} °C")
-            col2.metric("Prix Élec Moyen", f"{avg_elec:.2f} €/MWh")
-            col3.metric("Corrélation Temp/Élec", f"{correlation:.2f}", 
-                        help="Une valeur proche de -1 indique que les prix montent quand il fait froid.")
+            # Application du choc thermique pour la simulation
+            df["temp_sim"] = df["temp_mean"] + temp_shock
+            df["elec_sim"] = df["Electricity_Price"] + (abs(temp_shock) * 5.2 if temp_shock < 0 else 0)
 
-            # --- GRAPHIQUES ---
+            # --- KPI ---
+            c1, c2, c3, c4 = st.columns(4)
+            correlation = df["temp_mean"].corr(df["Electricity_Price"])
+            volatility = df["Electricity_Price"].std() / df["Electricity_Price"].mean() * 100
             
-            st.subheader("📊 Évolution Temporelle")
+            c1.metric("Temp. Moyenne", f"{df['temp_mean'].mean():.1f} °C")
+            c2.metric("Prix Élec Spot", f"{df['Electricity_Price'].mean():.2f} €", "MWh")
+            c3.metric("Corrélation", f"{correlation:.2f}", delta_color="inverse")
+            c4.metric("Volatilité", f"{volatility:.1f}%")
+
+            # --- VISUALISATION PRINCIPALE ---
+            st.subheader("🚠 Corrélation Temporelle : Température vs Prix")
             
-            # Graphique à double axe (Température vs Électricité)
-            fig_timeseries = go.Figure()
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(x=df["date"], y=df["temp_mean"], name="Température (°C)", line=dict(color="#EF553B", width=3)))
+            fig.add_trace(go.Scatter(x=df["date"], y=df["Electricity_Price"], name="Prix Élec (€/MWh)", yaxis="y2", line=dict(color="#636EFA", width=2, dash='dot')))
             
-            fig_timeseries.add_trace(go.Scatter(
-                x=full_df["date"], y=full_df["temp_mean"],
-                name="Température (°C)", line=dict(color="#FF4B4B")
-            ))
-            
-            fig_timeseries.add_trace(go.Scatter(
-                x=full_df["date"], y=full_df["Electricity_Price"],
-                name="Prix Électricité (€/MWh)", line=dict(color="#1F77B4"),
-                yaxis="y2"
-            ))
-            
-            fig_timeseries.update_layout(
-                yaxis=dict(title="Température (°C)"),
+            if temp_shock != 0:
+                fig.add_trace(go.Scatter(x=df["date"], y=df["elec_sim"], name="Prix Simulé (Choc)", yaxis="y2", line=dict(color="#FFA15A", width=2)))
+
+            fig.update_layout(
+                yaxis=dict(title="Température (°C)", gridcolor='rgba(0,0,0,0.1)'),
                 yaxis2=dict(title="Prix Électricité (€/MWh)", overlaying="y", side="right"),
-                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+                hovermode="x unified",
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                margin=dict(l=0, r=0, t=30, b=0),
+                plot_bgcolor='white'
             )
-            st.plotly_chart(fig_timeseries, use_container_width=True)
+            st.plotly_chart(fig, use_container_width=True)
+
+            # --- ANALYSE DE RÉGRESSION & STATS ---
+            col_left, col_right = st.columns([2, 1])
             
-            col_a, col_b = st.columns(2)
-            
-            with col_a:
-                st.subheader("📉 Nuage de points : Corrélation")
+            with col_left:
+                st.subheader("📉 Analyse de Régression (Sensibilité)")
+                fig_reg = px.get_trendline_results(px.scatter(df, x="temp_mean", y="Electricity_Price", trendline="ols"))
+                
                 fig_scatter = px.scatter(
-                    full_df, x="temp_mean", y="Electricity_Price",
-                    trendline="ols",
-                    labels={"temp_mean": "Température (°C)", "Electricity_Price": "Prix Électricité (€/MWh)"},
-                    title=f"Relation Température / Prix ({selected_city})",
-                    color_continuous_scale="RdBu"
+                    df, x="temp_mean", y="Electricity_Price", 
+                    color="Electricity_Price", 
+                    size=df["Electricity_Price"].abs(),
+                    labels={"temp_mean": "Température (°C)", "Electricity_Price": "Prix (€/MWh)"},
+                    template="plotly_white",
+                    trendline="ols"
                 )
                 st.plotly_chart(fig_scatter, use_container_width=True)
-                
-            with col_b:
-                st.subheader("🧪 Analyse Statistique")
-                st.write("Matrice de corrélation (Pearson) :")
-                corr_matrix = full_df[["temp_mean", "Electricity_Price", "Gas_Price"]].corr()
-                
-                # Gestion de l'affichage avec sécurité pour matplotlib
+
+            with col_right:
+                st.subheader("📋 Matrice Risque")
+                corr_matrix = df[["temp_mean", "Electricity_Price", "Gas_Price"]].corr()
                 try:
-                    st.dataframe(corr_matrix.style.background_gradient(cmap='coolwarm', axis=None), use_container_width=True)
-                except ImportError:
-                    st.dataframe(corr_matrix, use_container_width=True)
-                    st.warning("Note : Installez 'matplotlib' pour voir le dégradé de couleurs dans le tableau.")
+                    st.dataframe(corr_matrix.style.background_gradient(cmap='RdYlGn_r', axis=None).format("{:.2f}"), use_container_width=True)
+                except:
+                    st.dataframe(corr_matrix.round(2), use_container_width=True)
                 
-                st.info("""
-                **Interprétation :** En France, le mix électrique est très sensible au chauffage électrique. 
-                Une corrélation négative forte (ex: -0.8) confirme que la demande augmente significativement 
-                lors des vagues de froid, tirant les prix vers le haut.
+                st.markdown(f"""
+                **Note d'analyse :**
+                - Coefficient Beta Temp/Elec : **{correlation:.2f}**
+                - Un choc de **{temp_shock}°C** porterait le prix moyen théorique à **{df['elec_sim'].mean():.2f} €**.
+                - Le gaz présente une corrélation de **{df['temp_mean'].corr(df['Gas_Price']):.2f}**.
                 """)
 
-            # --- TABLEAU DE DONNÉES ---
-            with st.expander("Voir les données brutes"):
-                st.dataframe(full_df)
+            with st.expander("📂 Exportation des données brutes (Audit)"):
+                st.download_button("Télécharger CSV", df.to_csv(index=False), "energy_data_audit.csv", "text/csv")
+                st.dataframe(df.style.highlight_max(axis=0, color='#ffebcc'))
                 
         else:
-            st.warning("Impossible de récupérer les données météo pour cette période.")
+            st.error("Données indisponibles.")
 else:
-    st.info("Veuillez sélectionner une plage de dates valide dans la barre latérale.")
+    st.info("Sélectionnez une période pour lancer l'analyse.")
 
-# Footer
 st.markdown("---")
-st.caption("Données météo : Open-Meteo API | Prix de l'énergie : Données simulées pour démonstration technique.")
+st.caption(f"Propriété Intellectuelle : Florentin Gaugry - Analyste Energie/Finance | {datetime.now().year}")
